@@ -1,0 +1,25 @@
+{
+  "compilerOptions": {
+    "target": "ES2023",
+    "module": "NodeNext",
+    "moduleResolution": "NodeNext",
+    "outDir": ".test-dist",
+    "rootDir": ".",
+    "types": ["node", "vite/client"],
+    "strict": true,
+    "skipLibCheck": true,
+    "noUnusedLocals": true,
+    "noUnusedParameters": true
+  },
+  "include": [
+    "src/config.ts",
+    "src/domain/**/*.ts",
+    "src/utils/**/*.ts",
+    "src/types/**/*.d.ts",
+    "tests/**/*.ts"
+  ],
+  "exclude": [
+    "src/domain/ai/**/*.ts",
+    "src/domain/settings/localSettingsStorage.ts"
+  ]
+}

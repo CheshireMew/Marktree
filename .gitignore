@@ -1,0 +1,16 @@
+/Example
+/backend/data/
+/backend/data/ai_settings.json
+__pycache__/
+*.py[cod]
+backend/tests/.tmp/
+backend/venv/
+backend/build/
+backend/dist/
+frontend/src-tauri/target/
+frontend/src-tauri/*.exe
+frontend/keystore/
+frontend/android/keystore.properties
+frontend/android/local.properties
+codex-probe-*/
+backend/_archive_legacy/
