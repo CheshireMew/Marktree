@@ -1,128 +1,90 @@
-# Bemo
+# Marktree
 
-Bemo 现在应该被理解成同一套产品语义下的两种运行时和两套交互外壳，而不是所有平台共用一套实现。
+Marktree 是一个以 Markdown 文件和 Git 仓库为核心的 Windows / Android 写作工具。它直接编辑仓库里的源文件，不建立笔记数据库，也不要求用户把内容导入某种专有格式。
 
-当前稳定边界是：
+当前仓库是源码开发阶段，不提供安装包或应用商店版本。
 
-- Web / Desktop：以前端承载产品界面与流程，以 backend 承载主存储
-- Mobile：以前端承载移动端界面与流程，以本地存储承载主存储
+## 已实现
 
-这样划分不是临时兼容，而是当前产品现实。
+- Vue 3、TypeScript 与 Tauri 2 共用 Windows / Android 界面和领域模型。
+- Rust `git2/libgit2` 核心，无需系统安装 Git。
+- Windows 多仓库、多 Worktree、独立窗口与日常 Git 操作。
+- Android 应用私有仓库、简化界面与一键同步。
+- CodeMirror 源码保真编辑；只隐藏非当前结构的 Markdown 标记，不经过 HTML 反向转换。
+- GFM、Frontmatter、表格、任务列表、脚注即时展示、数学公式与 Mermaid；点击或移动到当前结构时仍直接编辑原文。
+- 约一秒自动保存，保存前比较磁盘哈希；外部修改不会被静默覆盖。
+- 图片粘贴/拖入、内容哈希命名、相对链接和 `.marktree/config.json`。
+- 工作区、暂存区、HEAD、远端、未保存内容及 Worktree 之间的对比。
+- GitHub 设备授权接口，以及 GitLab、Gitee、自建 HTTPS Git 服务的令牌凭据。
+- 中英文、亮暗主题和响应式桌面/手机布局。
 
-Web / Desktop 继续使用 backend 主存储，是因为本地存储在这些运行时里不够稳定，存在丢数据风险。Mobile 继续使用本地存储，是因为打包和运行时约束决定了它不能直接复用 Web / Desktop 这条路径。同时，移动端在交互和功能处理上也需要单独设计，不能把桌面界面直接缩到手机上。
+## 内容与状态边界
 
-## 现在怎样理解这个仓库
+Markdown 文件是内容唯一真源，Git 远程仓库负责跨设备同步。Marktree 的应用数据只保存最近仓库与文件、凭据引用、Marktree 修改清单、可恢复的 Git 操作阶段和冲突恢复副本，不保存 Markdown 正文镜像。
 
-不要再把仓库套进下面两种错误模型：
+一键同步只提交 Marktree 自己保存或加入的 Markdown、图片和 `.marktree/config.json`。它使用独立 index 构造提交，混合仓库里的源码改动不会被纳入同步提交，用户原有暂存项也不会被改写。同步阶段会持久化，进程退出后能够继续，不会重复提交或重复应用临时保存的工作区状态。
 
-- “backend 只是可选 sync-server”
-- “移动端只是桌面版的例外实现”
+仓库配置示例：
 
-更准确的理解是：
+```json
+{
+  "assetsDir": "assets",
+  "ignoreRules": ["build/**", "private/**"]
+}
+```
 
-- `frontend` 负责共享产品语义，以及各端界面与交互壳
-- `backend` 负责 Web / Desktop 的应用数据存储，同时提供同步服务和网页端代理能力
-- `mobile` 在存储、文件能力和 UI 结构上都有自己的运行时处理
+## 本地开发
 
-共享的是产品语义，不是所有平台的存储实现或界面骨架。
+需要 Node.js 24、Rust stable、Windows WebView2；Android 开发还需要 JDK 17、Android SDK、NDK 和 Git for Windows。仓库的 Android Rust 检查脚本会使用 `D:\Tools\GitPerlLib` 中的 OpenSSL 构建模块。
 
-## 当前共享与分离
+Windows 下可以直接双击根目录的 `start-dev.bat` 启动桌面开发版。脚本会优先使用 `D:\Tools` 中的 Node.js 与 Rust；如果尚未安装前端依赖，会先按 `package-lock.json` 执行 `npm ci`。
 
-下面这些应该尽量共享：
-
-- 笔记、附件、同步、导入导出、AI 的产品语义
-- 数据 contract 和归一化规则
-- 同步协议和冲突语义
-
-下面这些允许按端分开：
-
-- 主存储实现
-- 附件落地与打开方式
-- 文件选择、分享、原生能力接入
-- 页面结构、导航、编辑器交互和设置页布局
-
-## 关于移动端，不要再按“三端完全等价”理解
-
-当前需要明确记住的事实是：
-
-- Android / Mobile 应按 `local-backed runtime` 理解，不按 Web / Desktop 的 backend-backed 主存储理解
-- Mobile 不提供“从坚果云同步目录恢复”入口
-- Mobile 不提供“快捷键说明”设置页
-- Mobile 的复制笔记、图片预览、文件打开走原生 bridge
-
-这几条不是临时缺口，而是当前产品边界。后续如果讨论“某个桌面入口手机上为什么没有”，先判断是不是运行时和原生能力差异，不要先假设移动端漏实现。
-
-## 仓库结构
-
-- [frontend](./frontend)：产品前端、共享 domain、Web/Desktop shell、Mobile shell
-- [backend](./backend)：Web / Desktop 应用数据服务、同步 API、网页端代理
-- [scripts](./scripts)：仓库级脚本
-- [Example](./Example)：示例资源
-
-## 开发启动
-
-### Web / Desktop
-
-Web / Desktop 默认需要 backend 一起参与，建议直接从仓库根目录启动：
+也可以在终端中手动启动：
 
 ```powershell
-.\start-dev.ps1
+npm install
+npm run build
+npm run desktop
 ```
 
-或：
-
-```bat
-start-dev.bat
-```
-
-只有显式做纯界面调试时，才使用：
+Android 开发工程由 Tauri 生成：
 
 ```powershell
-.\start-dev.ps1 -FrontendOnly
+npm run android:init
+npm run android:dev
+npm run android:build:debug
 ```
 
-但这种方式不代表 Web / Desktop 主功能完整可用。
+`npm run check:android-rust` 可以只检查 Android `aarch64` Rust 与原生依赖，不生成 APK。完整 Android 验收才运行本地 Debug 构建；不制作面向分发的 Release 包，也不发布应用商店版本。
 
-### Backend
-
-如果只想单独启动 backend：
+GitHub 设备授权需要为自己的 OAuth App 提供构建环境变量：
 
 ```powershell
-cd backend
-.\start-sync-server.ps1
+$env:MARKTREE_GITHUB_CLIENT_ID = "your-oauth-app-client-id"
+npm run desktop
 ```
 
-### Mobile
+通用 HTTPS Git 服务可直接在仓库设置中保存用户名与个人访问令牌。凭据进入 Windows Credential Manager 或 Android Keystore，不写入仓库和应用状态 JSON。
 
-移动端相关开发和打包请看：
+## 验证
 
-- [frontend/README.md](./frontend/README.md)
-- [ANDROID_RELEASE_GUIDE.md](./ANDROID_RELEASE_GUIDE.md)
-- [ANDROID_PRELAUNCH_CHECKLIST.md](./ANDROID_PRELAUNCH_CHECKLIST.md)
+```powershell
+npm test
+npm run build
+cargo clippy --manifest-path src-tauri/Cargo.toml --all-targets -- -D warnings
+cargo test --manifest-path src-tauri/Cargo.toml
+```
 
-## 什么时候需要 backend
+运行 `npm run dev -- --host 127.0.0.1` 后，可用 `npm run test:visual` 检查桌面、紧凑桌面和手机布局。
 
-对 Web / Desktop：
+Rust 集成测试使用真实临时仓库和裸远程仓库，覆盖分支与 Worktree、结构化 diff、外部写入保护、编码与换行保真、Marktree 路径隔离、图片同步、远端提交、第二设备推拉、失败重试和冲突恢复。前端测试覆盖混合换行、逐段三方合并及可见组件交互，不用消费端伪造的 Git 返回值替代核心链路。
 
-- backend 是主存储的一部分，通常必须启动
+更多实现说明见 [架构文档](docs/ARCHITECTURE.md) 和 [测试说明](docs/TESTING.md)。
 
-对 Mobile：
+## 明确不做
 
-- 单机使用可以只走本地存储
-- 需要同步、网页端联调或特定代理能力时再连接 backend
+Marktree 不提供网页版、iOS、SSH、Bemo 数据迁移、AI、日历、标签体系、Obsidian 双链、交互式变基、拣选或 Git 标签管理。
 
-## 当前文档入口
+## License
 
-- 当前架构事实来源：[CURRENT_ARCHITECTURE.md](./CURRENT_ARCHITECTURE.md)
-- 前端说明：[frontend/README.md](./frontend/README.md)
-- 后端说明：[backend/README.md](./backend/README.md)
-
-## 结论
-
-Bemo 当前不是“所有端同一实现”，也不是“backend 只剩 sync-server”。
-
-当前准确描述是：
-
-- Web / Desktop：backend-backed product runtime
-- Mobile：local-backed product runtime
-- 两边共享产品语义，但不强求共享存储实现和 UI 外壳
+[MIT](LICENSE)

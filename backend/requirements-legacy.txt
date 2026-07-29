@@ -1,4 +1,0 @@
-python-multipart
-aiofiles
-pyyaml
-beautifulsoup4

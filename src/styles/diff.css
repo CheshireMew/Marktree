@@ -1,0 +1,146 @@
+.diff-panel {
+  position: absolute;
+  z-index: 8;
+  right: 0;
+  bottom: 25px;
+  left: 0;
+  display: flex;
+  height: min(52vh, 520px);
+  flex-direction: column;
+  border-top: 1px solid var(--border);
+  background: var(--surface);
+  box-shadow: 0 -16px 38px rgba(16, 33, 27, 0.13);
+}
+
+.diff-header {
+  flex: 0 0 auto;
+}
+
+.diff-header b {
+  margin-right: 7px;
+}
+
+.diff-header .addition {
+  color: var(--addition);
+}
+
+.diff-header .deletion {
+  color: var(--deletion);
+}
+
+.diff-controls select {
+  height: 29px;
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  outline: 0;
+  background: var(--panel);
+  font-size: 10px;
+}
+
+.diff-content {
+  flex: 1;
+  overflow: auto;
+  background: var(--paper);
+  font-family: ui-monospace, SFMono-Regular, Consolas, monospace;
+  font-size: 11px;
+}
+
+.diff-file > header {
+  position: sticky;
+  z-index: 1;
+  top: 0;
+  display: flex;
+  min-height: 34px;
+  align-items: center;
+  justify-content: space-between;
+  padding: 0 13px;
+  border-top: 1px solid var(--border);
+  border-bottom: 1px solid var(--border);
+  background: var(--panel);
+  font-family: var(--ui-font);
+}
+
+.diff-file > header i {
+  color: var(--text-soft);
+  font-size: 9px;
+  font-style: normal;
+  text-transform: uppercase;
+}
+
+.hunk-header {
+  padding: 4px 12px;
+  color: #526f91;
+  background: color-mix(in srgb, #dbe8f6, var(--paper) 45%);
+}
+
+.diff-line {
+  display: grid;
+  min-height: 20px;
+  grid-template-columns: 44px 44px minmax(0, 1fr);
+}
+
+.diff-line.addition,
+.split-line > .addition {
+  background: var(--addition-bg);
+}
+
+.diff-line.deletion,
+.split-line > .deletion {
+  background: var(--deletion-bg);
+}
+
+.line-number,
+.split-line > div > span {
+  padding: 2px 7px;
+  color: var(--text-soft);
+  background: color-mix(in srgb, currentColor, transparent 94%);
+  text-align: right;
+  user-select: none;
+}
+
+.diff-line code {
+  min-width: 0;
+  padding: 2px 8px;
+  overflow-x: visible;
+  white-space: pre-wrap;
+}
+
+.diff-line code i {
+  display: inline-block;
+  width: 13px;
+  color: var(--text-soft);
+  font-style: normal;
+  user-select: none;
+}
+
+.diff-line .word-change {
+  border-radius: 2px;
+  background: color-mix(in srgb, currentColor, transparent 82%);
+  font-weight: 650;
+}
+
+.split-line {
+  display: grid;
+  min-height: 20px;
+  grid-template-columns: 1fr 1fr;
+}
+
+.split-line > div {
+  display: grid;
+  min-width: 0;
+  grid-template-columns: 44px minmax(0, 1fr);
+  border-right: 1px solid var(--border-soft);
+}
+
+.split-line code {
+  min-width: 0;
+  padding: 2px 8px;
+  overflow: hidden;
+  white-space: pre-wrap;
+}
+
+.binary-change {
+  padding: 30px;
+  color: var(--text-soft);
+  text-align: center;
+}

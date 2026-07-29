@@ -1,0 +1,117 @@
+.add-menu {
+  position: fixed;
+  z-index: 30;
+  top: 72px;
+  left: 55px;
+  display: flex;
+  width: 190px;
+  flex-direction: column;
+  gap: 2px;
+  padding: 6px;
+  border: 1px solid var(--border);
+  border-radius: 9px;
+  background: var(--surface);
+  box-shadow: var(--shadow);
+}
+
+.add-menu button {
+  display: flex;
+  min-height: 35px;
+  align-items: center;
+  gap: 9px;
+  padding: 0 9px;
+  border-radius: 6px;
+  background: transparent;
+  text-align: left;
+}
+
+.add-menu button:hover {
+  background: var(--hover);
+}
+
+.welcome {
+  display: grid;
+  flex: 1;
+  place-items: center;
+  padding: 60px;
+  background:
+    radial-gradient(circle at 78% 14%, rgba(81, 139, 117, 0.13), transparent 31%),
+    radial-gradient(circle at 19% 83%, rgba(201, 168, 108, 0.12), transparent 27%),
+    var(--paper);
+}
+
+.welcome-copy {
+  width: min(680px, 100%);
+}
+
+.welcome-copy > img {
+  width: 72px;
+  margin-bottom: 18px;
+}
+
+.welcome-copy > span {
+  display: block;
+  margin-bottom: 15px;
+  color: var(--accent);
+  font-size: 11px;
+  font-weight: 800;
+  letter-spacing: 0.18em;
+}
+
+.welcome h1 {
+  max-width: 650px;
+  margin: 0;
+  font-family: var(--editor-font);
+  font-size: clamp(32px, 5vw, 56px);
+  font-weight: 650;
+  letter-spacing: -0.04em;
+  line-height: 1.14;
+}
+
+.welcome p {
+  max-width: 590px;
+  margin: 22px 0 28px;
+  color: var(--text-soft);
+  font-size: 16px;
+  line-height: 1.8;
+}
+
+.welcome-actions {
+  flex-wrap: wrap;
+}
+
+.welcome-actions button {
+  min-height: 42px;
+  padding: 0 15px;
+}
+
+.notice {
+  position: fixed;
+  z-index: 80;
+  right: 18px;
+  bottom: 38px;
+  display: flex;
+  max-width: min(520px, calc(100vw - 36px));
+  align-items: center;
+  gap: 12px;
+  padding: 11px 12px 11px 15px;
+  border: 1px solid color-mix(in srgb, var(--addition), transparent 60%);
+  border-radius: 9px;
+  color: var(--text);
+  background: var(--surface);
+  box-shadow: var(--shadow);
+  font-size: 12px;
+}
+
+.notice.error {
+  border-color: color-mix(in srgb, var(--danger), transparent 55%);
+}
+
+.notice button {
+  display: grid;
+  width: 24px;
+  height: 24px;
+  place-items: center;
+  border-radius: 5px;
+  background: transparent;
+}

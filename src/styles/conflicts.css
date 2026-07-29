@@ -1,0 +1,125 @@
+.comparison-dialog {
+  width: min(1080px, 96vw);
+}
+
+.conflict-dialog {
+  max-height: 94vh;
+}
+
+.repository-lifecycle {
+  justify-content: space-between;
+  border-top: 1px solid var(--border);
+  padding-top: 12px;
+  color: var(--text-soft);
+  font-size: 11px;
+}
+
+.three-way-resolver {
+  display: flex;
+  max-height: calc(94vh - 92px);
+  flex-direction: column;
+  overflow: hidden;
+}
+
+.merge-summary {
+  padding: 9px 16px;
+  border-bottom: 1px solid var(--border);
+  color: var(--text-soft);
+  font-size: 11px;
+}
+
+.merge-segments {
+  overflow: auto;
+}
+
+.merge-segments > article {
+  padding: 13px 16px;
+  border-bottom: 1px solid var(--border);
+}
+
+.merge-segments > article > header {
+  margin-bottom: 8px;
+  font-size: 11px;
+  font-weight: 700;
+}
+
+.merge-candidates {
+  display: grid;
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+  gap: 7px;
+}
+
+.merge-candidates button {
+  min-width: 0;
+  overflow: hidden;
+  border: 1px solid var(--border);
+  border-radius: 7px;
+  color: var(--editor-text);
+  background: var(--paper);
+  text-align: left;
+}
+
+.merge-candidates button:hover {
+  border-color: var(--accent);
+}
+
+.merge-candidates span {
+  display: block;
+  padding: 6px 8px;
+  border-bottom: 1px solid var(--border);
+  color: var(--text-soft);
+  background: var(--panel);
+  font-size: 9px;
+  font-weight: 700;
+}
+
+.merge-candidates pre {
+  max-height: 128px;
+  margin: 0;
+  overflow: auto;
+  padding: 9px;
+  font-family: ui-monospace, SFMono-Regular, Consolas, monospace;
+  font-size: 10px;
+  white-space: pre-wrap;
+}
+
+.merge-segments label,
+.merge-final {
+  display: grid;
+  gap: 6px;
+  margin-top: 9px;
+}
+
+.merge-segments label span,
+.merge-final span {
+  color: var(--text-soft);
+  font-size: 9px;
+  font-weight: 700;
+  text-transform: uppercase;
+}
+
+.merge-segments textarea,
+.merge-final textarea {
+  min-height: 74px;
+  padding: 8px 10px;
+  font-family: ui-monospace, SFMono-Regular, Consolas, monospace;
+  font-size: 10px;
+}
+
+.merge-final {
+  flex: 0 0 auto;
+  margin: 0;
+  padding: 11px 16px;
+  border-top: 1px solid var(--border);
+}
+
+.merge-final textarea {
+  min-height: 120px;
+  max-height: 24vh;
+}
+
+.three-way-resolver > footer {
+  justify-content: flex-end;
+  padding: 10px 16px;
+  border-top: 1px solid var(--border);
+}

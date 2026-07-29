@@ -1,0 +1,356 @@
+use std::{
+    fs,
+    path::{Path, PathBuf},
+};
+
+use crate::{
+    error::{AppError, AppResult},
+    file_version::hash_bytes,
+    state::PersistentState,
+    types::{
+        CredentialRecord, GitFileStatus, GitStatusSnapshot, RepositoryDescriptor,
+        WorktreeDescriptor,
+    },
+};
+use git2::{
+    build::{CheckoutBuilder, RepoBuilder},
+    BranchType, Oid, Repository, RepositoryInitOptions, Signature, Status, StatusOptions,
+    WorktreeLockStatus,
+};
+
+use super::remote::{fetch_options, remote_url, validate_remote_url};
+
+pub fn repository_lock_key(path: &str) -> String {
+    let repository = Repository::discover(path).ok();
+    let resolved = repository
+        .as_ref()
+        .and_then(|repo| fs::canonicalize(repo.commondir()).ok())
+        .or_else(|| fs::canonicalize(path).ok())
+        .or_else(|| {
+            let path = Path::new(path);
+            path.parent()
+                .and_then(|parent| fs::canonicalize(parent).ok())
+                .map(|parent| parent.join(path.file_name().unwrap_or_default()))
+        })
+        .unwrap_or_else(|| PathBuf::from(path));
+    let key = resolved.to_string_lossy().into_owned();
+    if cfg!(target_os = "windows") {
+        key.to_lowercase()
+    } else {
+        key
+    }
+}
+
+pub fn open_repository(path: &str, app_state: &PersistentState) -> AppResult<RepositoryDescriptor> {
+    let repo = Repository::discover(path)?;
+    let descriptor = repository_descriptor(&repo)?;
+    app_state.register_repository(&descriptor.root)?;
+    Ok(descriptor)
+}
+
+pub fn initialize_repository(
+    path: &str,
+    app_state: &PersistentState,
+) -> AppResult<RepositoryDescriptor> {
+    fs::create_dir_all(path)?;
+    let mut options = RepositoryInitOptions::new();
+    options.initial_head("main");
+    let repo = Repository::init_opts(path, &options)?;
+    let descriptor = repository_descriptor(&repo)?;
+    app_state.register_repository(&descriptor.root)?;
+    Ok(descriptor)
+}
+
+pub fn clone_repository(
+    remote_url: &str,
+    path: &str,
+    credential: Option<CredentialRecord>,
+    app_state: &PersistentState,
+) -> AppResult<RepositoryDescriptor> {
+    validate_remote_url(remote_url)?;
+    let fetch_options = fetch_options(credential);
+    let mut builder = RepoBuilder::new();
+    builder.fetch_options(fetch_options);
+    let repo = builder.clone(remote_url, Path::new(path))?;
+    let descriptor = repository_descriptor(&repo)?;
+    app_state.register_repository(&descriptor.root)?;
+    Ok(descriptor)
+}
+
+pub fn refresh_repository(root: &str) -> AppResult<RepositoryDescriptor> {
+    repository_descriptor(&Repository::open(root)?)
+}
+
+pub fn repository_status(root: &str) -> AppResult<GitStatusSnapshot> {
+    status_snapshot(&Repository::open(root)?)
+}
+
+fn repository_descriptor(repo: &Repository) -> AppResult<RepositoryDescriptor> {
+    let main = main_repository(repo)?;
+    let main_root = workdir_string(&main)?;
+    let mut worktrees = vec![descriptor_for_worktree(
+        "main",
+        Path::new(&main_root),
+        true,
+        false,
+    )?];
+    let worktree_names = main.worktrees()?;
+    for item in worktree_names.iter() {
+        let Some(name) = item? else {
+            continue;
+        };
+        let worktree = main.find_worktree(name)?;
+        let locked = worktree.is_locked()? != WorktreeLockStatus::Unlocked;
+        worktrees.push(descriptor_for_worktree(
+            name,
+            worktree.path(),
+            false,
+            locked,
+        )?);
+    }
+    worktrees.sort_by(|left, right| {
+        right
+            .is_main
+            .cmp(&left.is_main)
+            .then_with(|| left.name.to_lowercase().cmp(&right.name.to_lowercase()))
+    });
+    let common_dir = fs::canonicalize(main.commondir())?
+        .to_string_lossy()
+        .into_owned();
+    let id = hash_bytes(repository_lock_key(&main_root).as_bytes())[..16].to_owned();
+    let name = Path::new(&main_root)
+        .file_name()
+        .map(|value| value.to_string_lossy().into_owned())
+        .unwrap_or_else(|| "Repository".to_owned());
+    Ok(RepositoryDescriptor {
+        id,
+        name,
+        root: main_root,
+        common_dir,
+        remote_url: remote_url(&main),
+        status: status_snapshot(repo)?,
+        worktrees,
+    })
+}
+
+pub(super) fn descriptor_for_worktree(
+    name: &str,
+    path: &Path,
+    is_main: bool,
+    is_locked: bool,
+) -> AppResult<WorktreeDescriptor> {
+    let repo = Repository::open(path)?;
+    Ok(WorktreeDescriptor {
+        name: name.to_owned(),
+        path: workdir_string(&repo)?,
+        branch: current_branch(&repo),
+        is_main,
+        is_locked,
+        is_detached: repo.head_detached()?,
+        status: status_snapshot(&repo)?,
+    })
+}
+
+pub(super) fn status_snapshot(repo: &Repository) -> AppResult<GitStatusSnapshot> {
+    let mut options = StatusOptions::new();
+    options
+        .include_untracked(true)
+        .recurse_untracked_dirs(true)
+        .renames_head_to_index(true)
+        .renames_index_to_workdir(true)
+        .exclude_submodules(true);
+    let statuses = repo.statuses(Some(&mut options))?;
+    let mut files = Vec::new();
+    for entry in statuses.iter() {
+        let status = entry.status();
+        let path = entry
+            .path()
+            .ok()
+            .map(str::to_owned)
+            .or_else(|| {
+                entry
+                    .head_to_index()
+                    .and_then(|delta| delta.new_file().path())
+                    .and_then(Path::to_str)
+                    .map(str::to_owned)
+            })
+            .or_else(|| {
+                entry
+                    .index_to_workdir()
+                    .and_then(|delta| delta.new_file().path())
+                    .and_then(Path::to_str)
+                    .map(str::to_owned)
+            })
+            .unwrap_or_default()
+            .replace('\\', "/");
+        if path.is_empty() {
+            continue;
+        }
+        files.push(GitFileStatus {
+            path,
+            index_status: index_status(status).to_owned(),
+            worktree_status: worktree_status(status).to_owned(),
+            staged: is_staged(status),
+            conflicted: status.contains(Status::CONFLICTED),
+            untracked: status.contains(Status::WT_NEW),
+        });
+    }
+    files.sort_by_key(|entry| entry.path.to_lowercase());
+    let (upstream, ahead, behind) = upstream_status(repo);
+    Ok(GitStatusSnapshot {
+        branch: current_branch(repo),
+        upstream,
+        ahead,
+        behind,
+        staged_count: files.iter().filter(|file| file.staged).count(),
+        changed_count: files
+            .iter()
+            .filter(|file| file.worktree_status != "clean")
+            .count(),
+        untracked_count: files.iter().filter(|file| file.untracked).count(),
+        conflicted_count: files.iter().filter(|file| file.conflicted).count(),
+        files,
+    })
+}
+
+fn upstream_status(repo: &Repository) -> (Option<String>, usize, usize) {
+    let Ok(head) = repo.head() else {
+        return (None, 0, 0);
+    };
+    let Ok(branch_name) = head.shorthand() else {
+        return (None, 0, 0);
+    };
+    let Ok(branch) = repo.find_branch(branch_name, BranchType::Local) else {
+        return (None, 0, 0);
+    };
+    let Ok(upstream) = branch.upstream() else {
+        return (None, 0, 0);
+    };
+    let name = upstream
+        .get()
+        .shorthand()
+        .ok()
+        .map(str::to_owned)
+        .or_else(|| upstream.name().ok().flatten().map(str::to_owned));
+    let counts = head
+        .target()
+        .zip(upstream.get().target())
+        .and_then(|(local, remote)| repo.graph_ahead_behind(local, remote).ok())
+        .unwrap_or((0, 0));
+    (name, counts.0, counts.1)
+}
+
+pub(super) fn upstream_commit(repo: &Repository) -> AppResult<git2::Commit<'_>> {
+    let head = repo.head()?;
+    let branch_name = head
+        .shorthand()
+        .map_err(|_| AppError::Message("Detached HEAD has no upstream.".to_owned()))?;
+    let branch = repo.find_branch(branch_name, BranchType::Local)?;
+    let upstream = branch
+        .upstream()
+        .map_err(|_| AppError::Message("The current branch has no upstream.".to_owned()))?;
+    upstream.get().peel_to_commit().map_err(AppError::from)
+}
+
+pub(super) fn fast_forward(repo: &Repository, target: Oid) -> AppResult<()> {
+    let mut head = repo.head()?;
+    head.set_target(target, "Marktree fast-forward")?;
+    repo.set_head(
+        head.name()
+            .map_err(|_| AppError::Message("HEAD reference has no name.".to_owned()))?,
+    )?;
+    let mut checkout = CheckoutBuilder::new();
+    // The caller has already preserved every worktree change in the automatic
+    // stash. A force checkout is required after moving the branch reference;
+    // safe checkout otherwise treats the old index as user content and can
+    // leave the visible worktree at the pre-fetch commit.
+    checkout.force();
+    repo.checkout_head(Some(&mut checkout))?;
+    Ok(())
+}
+
+pub(super) fn main_repository(repo: &Repository) -> AppResult<Repository> {
+    let common_dir = repo.commondir();
+    let main_root = common_dir
+        .parent()
+        .ok_or_else(|| AppError::InvalidPath(common_dir.display().to_string()))?;
+    Ok(Repository::open(main_root)?)
+}
+
+pub(super) fn signature(repo: &Repository) -> AppResult<Signature<'static>> {
+    if let Ok(signature) = repo.signature() {
+        let name = signature.name().unwrap_or("Marktree User").to_owned();
+        let email = signature.email().unwrap_or("marktree@localhost").to_owned();
+        return Ok(Signature::now(&name, &email)?);
+    }
+    Ok(Signature::now("Marktree User", "marktree@localhost")?)
+}
+
+pub(super) fn current_branch(repo: &Repository) -> Option<String> {
+    repo.head()
+        .ok()
+        .and_then(|head| head.shorthand().ok().map(str::to_owned))
+        .or_else(|| {
+            repo.find_reference("HEAD")
+                .ok()
+                .and_then(|head| head.symbolic_target().ok().flatten().map(str::to_owned))
+                .and_then(|target| target.strip_prefix("refs/heads/").map(str::to_owned))
+        })
+}
+
+pub(super) fn workdir(repo: &Repository) -> AppResult<&Path> {
+    repo.workdir()
+        .ok_or_else(|| AppError::Message("A bare repository has no editable worktree.".to_owned()))
+}
+
+pub(super) fn workdir_string(repo: &Repository) -> AppResult<String> {
+    Ok(fs::canonicalize(workdir(repo)?)?
+        .to_string_lossy()
+        .into_owned())
+}
+
+pub(super) fn is_staged(status: Status) -> bool {
+    status.intersects(
+        Status::INDEX_NEW
+            | Status::INDEX_MODIFIED
+            | Status::INDEX_DELETED
+            | Status::INDEX_RENAMED
+            | Status::INDEX_TYPECHANGE,
+    )
+}
+
+fn index_status(status: Status) -> &'static str {
+    if status.contains(Status::CONFLICTED) {
+        "conflicted"
+    } else if status.contains(Status::INDEX_NEW) {
+        "added"
+    } else if status.contains(Status::INDEX_DELETED) {
+        "deleted"
+    } else if status.contains(Status::INDEX_RENAMED) {
+        "renamed"
+    } else if status.contains(Status::INDEX_TYPECHANGE) {
+        "typechange"
+    } else if status.contains(Status::INDEX_MODIFIED) {
+        "modified"
+    } else {
+        "clean"
+    }
+}
+
+pub(super) fn worktree_status(status: Status) -> &'static str {
+    if status.contains(Status::CONFLICTED) {
+        "conflicted"
+    } else if status.contains(Status::WT_NEW) {
+        "untracked"
+    } else if status.contains(Status::WT_DELETED) {
+        "deleted"
+    } else if status.contains(Status::WT_RENAMED) {
+        "renamed"
+    } else if status.contains(Status::WT_TYPECHANGE) {
+        "typechange"
+    } else if status.contains(Status::WT_MODIFIED) {
+        "modified"
+    } else {
+        "clean"
+    }
+}

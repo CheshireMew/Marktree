@@ -1,0 +1,193 @@
+.modal-backdrop {
+  position: fixed;
+  z-index: 100;
+  inset: 0;
+  display: grid;
+  place-items: center;
+  padding: 22px;
+  background: rgba(12, 24, 19, 0.48);
+  backdrop-filter: blur(4px);
+}
+
+.dialog {
+  width: min(540px, 100%);
+  overflow: hidden;
+  border: 1px solid var(--border);
+  border-radius: 13px;
+  background: var(--panel);
+  box-shadow: var(--shadow);
+}
+
+.compact-dialog {
+  width: min(430px, 100%);
+}
+
+.dialog > header {
+  display: flex;
+  min-height: 62px;
+  align-items: flex-start;
+  justify-content: space-between;
+  padding: 15px 18px;
+  border-bottom: 1px solid var(--border);
+}
+
+.dialog h2 {
+  margin: 0;
+  font-size: 17px;
+}
+
+.dialog header p {
+  margin: 5px 0 0;
+  color: var(--text-soft);
+  font-size: 11px;
+  line-height: 1.5;
+}
+
+.dialog > header > button {
+  width: 27px;
+  height: 27px;
+  border-radius: 6px;
+  color: var(--text-soft);
+  background: transparent;
+  font-size: 20px;
+}
+
+.dialog > label,
+.form-grid {
+  margin: 15px 18px;
+}
+
+.dialog label {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+
+.dialog label > span {
+  color: var(--text-soft);
+  font-size: 10px;
+  font-weight: 650;
+  letter-spacing: 0.05em;
+  text-transform: uppercase;
+}
+
+.dialog input,
+.dialog textarea {
+  width: 100%;
+  min-height: 38px;
+  border: 1px solid var(--border);
+  border-radius: 7px;
+  outline: 0;
+  padding: 0 10px;
+  background: var(--surface);
+}
+
+.dialog textarea {
+  min-height: 72px;
+  resize: vertical;
+  padding-top: 9px;
+}
+
+.dialog input:focus,
+.dialog textarea:focus {
+  border-color: var(--accent);
+  box-shadow: 0 0 0 2px var(--selection);
+}
+
+.input-action {
+  display: flex;
+  gap: 6px;
+}
+
+.input-action button {
+  width: 42px;
+  border: 1px solid var(--border);
+  border-radius: 7px;
+  background: var(--surface);
+}
+
+.clone-auth {
+  margin-top: 14px;
+  padding: 14px 18px 0;
+  border-top: 1px solid var(--border);
+}
+
+.clone-auth > header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  margin-bottom: 10px;
+}
+
+.clone-auth > header div {
+  display: grid;
+  gap: 3px;
+}
+
+.clone-auth > header strong {
+  font-size: 11px;
+}
+
+.clone-auth > header span {
+  color: var(--text-soft);
+  font-size: 9px;
+}
+
+.clone-auth > header button {
+  min-height: 30px;
+  padding: 0 10px;
+  border-radius: 6px;
+  color: #fff;
+  background: var(--accent);
+  font-size: 10px;
+}
+
+.clone-auth > label {
+  margin: 9px 0;
+}
+
+.form-grid {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 12px;
+}
+
+.form-grid label {
+  margin: 0;
+}
+
+.dialog > footer {
+  justify-content: flex-end;
+  min-height: 60px;
+  margin-top: 16px;
+  padding: 11px 18px;
+  border-top: 1px solid var(--border);
+}
+
+.image-preview-dialog {
+  width: min(1080px, 96vw);
+  max-height: 94vh;
+}
+
+.image-preview-dialog > div {
+  display: grid;
+  min-height: 240px;
+  max-height: calc(94vh - 72px);
+  place-items: center;
+  overflow: auto;
+  padding: 20px;
+  background:
+    linear-gradient(45deg, var(--border) 25%, transparent 25%) 0 0 / 20px 20px,
+    linear-gradient(-45deg, var(--border) 25%, transparent 25%) 0 10px / 20px 20px,
+    linear-gradient(45deg, transparent 75%, var(--border) 75%) 10px -10px / 20px 20px,
+    linear-gradient(-45deg, transparent 75%, var(--border) 75%) -10px 0 / 20px 20px,
+    var(--paper);
+}
+
+.image-preview-dialog img {
+  display: block;
+  max-width: 100%;
+  max-height: calc(94vh - 112px);
+  object-fit: contain;
+}

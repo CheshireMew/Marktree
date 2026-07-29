@@ -1,0 +1,13 @@
+{
+  "$schema": "../gen/schemas/desktop-schema.json",
+  "identifier": "default",
+  "description": "Default Marktree capability",
+  "windows": ["main", "workspace-*"],
+  "permissions": [
+    "core:default",
+    "core:webview:allow-create-webview-window",
+    "dialog:default",
+    "os:default",
+    "opener:default"
+  ]
+}

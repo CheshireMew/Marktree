@@ -1,52 +1,19 @@
-# Repository Guidance
+# Marktree repository guidance
 
-## Project Identity
+Marktree is a source-faithful Markdown workspace for Windows and Android.
 
-This repository should be treated as one product with shared domain semantics, but with:
+## Product invariants
 
-- a backend-backed Web / Desktop runtime
-- a local-backed Mobile runtime
-- separate interaction shells for Web / Desktop and Mobile
+- Markdown files in Git worktrees are the only source of truth for document content.
+- Git repositories are the only source of truth for history and cross-device synchronization.
+- Application state may store recent paths, UI state, credential references, changed-path manifests, and recovery copies. It must not mirror active Markdown content.
+- Vue owns presentation and interaction. Rust/Tauri owns filesystem, Git, credentials, and repository discovery.
+- Android exposes a simple synchronize flow. Desktop additionally exposes worktrees and the daily Git workflow.
+- Do not add a web runtime, Python service, content database, Bemo compatibility layer, or proprietary document format.
 
-It is not a pure local-first app, and it is not a generic frontend/backend split app.
+## Verification
 
-## Default Assumptions
-
-When reading or modifying this repo, assume:
-
-- Web / Desktop use backend app storage as the primary source of truth
-- Mobile uses local app storage as the primary source of truth
-- frontend owns product semantics, UI shells, sync flow, AI, and import/export semantics
-- backend owns Web / Desktop app storage plus sync and browser-proxy capabilities
-- Mobile is not just a reduced Web shell; it may need distinct UI and runtime handling
-
-## Architectural Boundary
-
-Keep these concerns shared when possible:
-
-- note, attachment, sync, import/export, and AI contracts
-- normalization rules
-- sync protocol and conflict semantics
-
-Keep these concerns runtime-specific when needed:
-
-- primary storage implementation
-- attachment persistence and URL resolution
-- file picking, sharing, and native capability bridges
-- page structure, navigation, editor interaction, and settings layout
-
-## Change Direction
-
-Do not try to force all platforms back into one storage path or one UI shell.
-
-When a feature diverges, the goal is:
-
-- one product semantics
-- isolated runtime adapters
-- separate shells where UX genuinely differs
-
-If uncertain, choose this interpretation:
-
-- `frontend` = shared product layer + platform shells
-- `backend` = Web / Desktop app data service + sync service
-- `mobile` = local runtime with its own shell and runtime adapters
+- Git tests use real repositories and bare remotes.
+- Source-fidelity tests prove that opening and saving an unchanged Markdown document is byte-for-byte stable.
+- Core-chain tests must verify that a saved file becomes a Git change, is committed and pushed, and can be read from a second clone.
+- Run frontend tests, Rust tests, the production frontend build, the Windows native check, and the Android debug check for release-facing changes.
