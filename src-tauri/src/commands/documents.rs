@@ -1,27 +1,32 @@
-use tauri::State;
+use tauri::{AppHandle, Manager, State};
 
 use crate::{
     documents,
     error::AppResult,
     git,
-    state::{PersistentState, RepositoryRuntime},
+    paths::{canonical_root, resolve_existing_entry},
+    state::{PersistentState, WorkspaceRuntime},
     types::{
-        AssetPreview, AssetWriteResult, DocumentContent, DocumentDescriptor,
-        RepositoryConfigSnapshot, SaveDocumentRequest, SaveDocumentResult,
-        SaveRepositoryConfigRequest,
+        AssetPreview, AssetWriteResult, DocumentContent, MoveWorkspaceEntryRequest,
+        SaveDocumentRequest, SaveDocumentResult, SaveWorkspaceConfigRequest, TrashEntry,
+        WorkspaceConfigSnapshot, WorkspaceEntry, WorkspaceEntryMoveResult,
     },
 };
 
-use super::support::{ensure_writable_during_git_operation, with_repository_lock};
+use super::support::{ensure_writable_during_git_operation, with_workspace_lock};
 
 #[tauri::command(async)]
-pub fn list_documents(
+pub fn list_workspace_entries(
     root: String,
-    statuses: Vec<crate::types::GitFileStatus>,
-    runtime: State<'_, RepositoryRuntime>,
-) -> AppResult<Vec<DocumentDescriptor>> {
-    with_repository_lock(&runtime, &root, || {
-        documents::list_documents(&root, &statuses)
+    runtime: State<'_, WorkspaceRuntime>,
+) -> AppResult<Vec<WorkspaceEntry>> {
+    with_workspace_lock(&runtime, &root, || {
+        let statuses = if git::has_git_capability(&root) {
+            git::repository_status(&root)?.files
+        } else {
+            Vec::new()
+        };
+        documents::list_workspace_entries(&root, &statuses)
     })
 }
 
@@ -29,9 +34,9 @@ pub fn list_documents(
 pub fn read_document(
     root: String,
     path: String,
-    runtime: State<'_, RepositoryRuntime>,
+    runtime: State<'_, WorkspaceRuntime>,
 ) -> AppResult<DocumentContent> {
-    with_repository_lock(&runtime, &root, || documents::read_document(&root, &path))
+    with_workspace_lock(&runtime, &root, || documents::read_document(&root, &path))
 }
 
 #[tauri::command(async)]
@@ -39,9 +44,9 @@ pub fn open_document(
     root: String,
     path: String,
     state: State<'_, PersistentState>,
-    runtime: State<'_, RepositoryRuntime>,
+    runtime: State<'_, WorkspaceRuntime>,
 ) -> AppResult<DocumentContent> {
-    with_repository_lock(&runtime, &root, || {
+    with_workspace_lock(&runtime, &root, || {
         documents::open_document(&root, &path, &state)
     })
 }
@@ -50,19 +55,19 @@ pub fn open_document(
 pub fn read_asset(
     root: String,
     path: String,
-    runtime: State<'_, RepositoryRuntime>,
+    runtime: State<'_, WorkspaceRuntime>,
 ) -> AppResult<AssetPreview> {
-    with_repository_lock(&runtime, &root, || documents::read_asset(&root, &path))
+    with_workspace_lock(&runtime, &root, || documents::read_asset(&root, &path))
 }
 
 #[tauri::command(async)]
 pub fn save_document(
     request: SaveDocumentRequest,
     state: State<'_, PersistentState>,
-    runtime: State<'_, RepositoryRuntime>,
+    runtime: State<'_, WorkspaceRuntime>,
 ) -> AppResult<SaveDocumentResult> {
     let root = request.root.clone();
-    with_repository_lock(&runtime, &root, || {
+    with_workspace_lock(&runtime, &root, || {
         ensure_writable_during_git_operation(&state, &root)?;
         documents::save_document(request, &state)
     })
@@ -73,32 +78,32 @@ pub fn create_document(
     root: String,
     path: String,
     state: State<'_, PersistentState>,
-    runtime: State<'_, RepositoryRuntime>,
+    runtime: State<'_, WorkspaceRuntime>,
 ) -> AppResult<DocumentContent> {
-    with_repository_lock(&runtime, &root, || {
+    with_workspace_lock(&runtime, &root, || {
         ensure_writable_during_git_operation(&state, &root)?;
         documents::create_document(&root, &path, &state)
     })
 }
 
 #[tauri::command(async)]
-pub fn read_repository_config(
+pub fn read_workspace_config(
     root: String,
-    runtime: State<'_, RepositoryRuntime>,
-) -> AppResult<RepositoryConfigSnapshot> {
-    with_repository_lock(&runtime, &root, || documents::read_repository_config(&root))
+    runtime: State<'_, WorkspaceRuntime>,
+) -> AppResult<WorkspaceConfigSnapshot> {
+    with_workspace_lock(&runtime, &root, || documents::read_workspace_config(&root))
 }
 
 #[tauri::command(async)]
-pub fn save_repository_config(
-    request: SaveRepositoryConfigRequest,
+pub fn save_workspace_config(
+    request: SaveWorkspaceConfigRequest,
     state: State<'_, PersistentState>,
-    runtime: State<'_, RepositoryRuntime>,
-) -> AppResult<RepositoryConfigSnapshot> {
+    runtime: State<'_, WorkspaceRuntime>,
+) -> AppResult<WorkspaceConfigSnapshot> {
     let root = request.root.clone();
-    with_repository_lock(&runtime, &root, || {
+    with_workspace_lock(&runtime, &root, || {
         ensure_writable_during_git_operation(&state, &root)?;
-        documents::save_repository_config(request, &state)
+        documents::save_workspace_config(request, &state)
     })
 }
 
@@ -110,9 +115,9 @@ pub fn write_asset(
     base64_data: String,
     assets_dir: Option<String>,
     state: State<'_, PersistentState>,
-    runtime: State<'_, RepositoryRuntime>,
+    runtime: State<'_, WorkspaceRuntime>,
 ) -> AppResult<AssetWriteResult> {
-    with_repository_lock(&runtime, &root, || {
+    with_workspace_lock(&runtime, &root, || {
         ensure_writable_during_git_operation(&state, &root)?;
         documents::write_asset(
             &root,
@@ -130,11 +135,96 @@ pub fn search_documents(
     root: String,
     query: String,
     limit: usize,
-    runtime: State<'_, RepositoryRuntime>,
+    runtime: State<'_, WorkspaceRuntime>,
 ) -> AppResult<Vec<String>> {
     let key = git::repository_lock_key(&root);
     let generation = runtime.begin_search(&key);
     documents::search_documents(&root, &query, limit.min(500), || {
         runtime.is_search_current(&key, generation)
     })
+}
+
+#[tauri::command(async)]
+pub fn create_workspace_folder(
+    root: String,
+    path: String,
+    state: State<'_, PersistentState>,
+    runtime: State<'_, WorkspaceRuntime>,
+) -> AppResult<String> {
+    with_workspace_lock(&runtime, &root, || {
+        ensure_writable_during_git_operation(&state, &root)?;
+        documents::create_folder(&root, &path)
+    })
+}
+
+#[tauri::command(async)]
+pub fn move_workspace_entry(
+    request: MoveWorkspaceEntryRequest,
+    state: State<'_, PersistentState>,
+    runtime: State<'_, WorkspaceRuntime>,
+) -> AppResult<WorkspaceEntryMoveResult> {
+    let root = request.root.clone();
+    with_workspace_lock(&runtime, &root, || {
+        ensure_writable_during_git_operation(&state, &root)?;
+        documents::move_entry(
+            &root,
+            &request.source_path,
+            &request.destination_path,
+            &state,
+        )
+    })
+}
+
+#[tauri::command(async)]
+pub fn trash_workspace_entry(
+    root: String,
+    path: String,
+    app: AppHandle,
+    state: State<'_, PersistentState>,
+    runtime: State<'_, WorkspaceRuntime>,
+) -> AppResult<Option<TrashEntry>> {
+    with_workspace_lock(&runtime, &root, || {
+        ensure_writable_during_git_operation(&state, &root)?;
+        documents::trash_entry(&root, &path, &app.path().app_data_dir()?, &state)
+    })
+}
+
+#[tauri::command(async)]
+pub fn list_workspace_trash(app: AppHandle) -> AppResult<Vec<TrashEntry>> {
+    documents::list_android_trash(&app.path().app_data_dir()?)
+}
+
+#[tauri::command(async)]
+pub fn restore_workspace_trash(
+    id: String,
+    app: AppHandle,
+    state: State<'_, PersistentState>,
+    runtime: State<'_, WorkspaceRuntime>,
+) -> AppResult<TrashEntry> {
+    let entries = documents::list_android_trash(&app.path().app_data_dir()?)?;
+    let entry = entries
+        .iter()
+        .find(|entry| entry.id == id)
+        .ok_or_else(|| crate::error::AppError::FileNotFound { path: id.clone() })?;
+    let root = entry.workspace_root.clone();
+    with_workspace_lock(&runtime, &root, || {
+        ensure_writable_during_git_operation(&state, &root)?;
+        documents::restore_android_trash(&app.path().app_data_dir()?, &id, &state)
+    })
+}
+
+#[tauri::command(async)]
+pub fn empty_workspace_trash(app: AppHandle) -> AppResult<()> {
+    documents::empty_android_trash(&app.path().app_data_dir()?)
+}
+
+#[tauri::command(async)]
+pub fn open_workspace_file_with_system(root: String, path: String) -> AppResult<()> {
+    let root_path = canonical_root(&root)?;
+    let file_path = resolve_existing_entry(&root_path, &path)?;
+    if !file_path.is_file() {
+        return Err(crate::error::AppError::InvalidPath(path));
+    }
+    tauri_plugin_opener::open_path(file_path, None::<&str>)
+        .map_err(|error| crate::error::AppError::Message(error.to_string()))
 }

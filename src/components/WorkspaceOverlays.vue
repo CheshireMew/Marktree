@@ -2,7 +2,7 @@
 import { FileText, Search } from 'lucide-vue-next'
 
 import type {
-  DocumentDescriptor,
+  WorkspaceEntry,
   UnsavedComparison,
   WorkspaceImagePreview,
 } from '@/types'
@@ -11,7 +11,7 @@ defineProps<{
   externalComparison?: UnsavedComparison
   quickOpen: boolean
   quickOpenQuery: string
-  quickOpenResults: DocumentDescriptor[]
+  quickOpenResults: WorkspaceEntry[]
   imagePreview?: WorkspaceImagePreview
 }>()
 

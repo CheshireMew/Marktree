@@ -1,9 +1,10 @@
 import { isTauri, nativeApi } from '@/lib/api'
 import { saveEditorTabUntilStable } from '@/lib/documentSaveCoordinator'
 import { readableError } from '@/lib/errors'
-import type { DocumentDescriptor, EditorTab, UnsavedComparison } from '@/types'
+import type { EditorTab, UnsavedComparison, WorkspaceEntry } from '@/types'
 
 import {
+  activeWorkspace,
   activeTab,
   externalComparison,
   externalComparisons,
@@ -162,8 +163,8 @@ export async function closeTab(tab: EditorTab) {
 }
 
 export async function refreshStatusForRoot(root: string) {
-  if (!root || !isTauri()) return
-  updateWorktreeStatus(root, await nativeApi.repositoryStatus({ root }))
+  if (!root || !isTauri() || !activeWorkspace.value?.git) return
+  updateWorktreeStatus(root, await nativeApi.workspaceGitStatus({ root }))
 }
 
 export async function flushAll(root?: string) {
@@ -182,14 +183,14 @@ export async function flushAll(root?: string) {
 
 export async function reconcileOpenTabs(
   session: WorkspaceSession,
-  nextDocuments: DocumentDescriptor[],
+  nextEntries: WorkspaceEntry[],
   generation: number,
 ) {
-  const available = new Map(nextDocuments.map((document) => [document.path, document]))
+  const available = new Map(nextEntries.map((entry) => [entry.path, entry]))
   for (const tab of [...session.tabs]) {
     if (session.loadGeneration !== generation) return
     const descriptor = available.get(tab.path)
-    if (!descriptor || !['markdown', 'text'].includes(descriptor.kind)) {
+    if (!descriptor || !['markdown', 'text'].includes(descriptor.fileKind ?? '')) {
       if (tab.dirty) {
         enqueueExternalComparison({
           tabKey: tabKey(tab.root, tab.path),

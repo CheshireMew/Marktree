@@ -19,12 +19,12 @@ import {
   TaskWidget,
   type ResolvedImageSource,
 } from './previewWidgets'
-import type { RepositoryImageLoader } from '@/types'
+import type { WorkspaceImageLoader } from '@/types'
 
 export interface MarkdownImageContext {
   root?: string
   path?: string
-  loadRepositoryImage: RepositoryImageLoader
+  loadWorkspaceImage: WorkspaceImageLoader
 }
 
 function liveMarkdownDecorations(
@@ -114,7 +114,7 @@ function liveMarkdownDecorations(
           widget: new ImageWidget(
             source,
             match[1] ?? '',
-            imageContext.loadRepositoryImage,
+            imageContext.loadWorkspaceImage,
           ),
         }).range(from, to),
       )
@@ -251,8 +251,8 @@ function resolveImageSource(
   } catch {
     return { kind: 'external', key: source, url: '' }
   }
-  const fromRepositoryRoot = decoded.startsWith('/') || decoded.startsWith('\\')
-  const directory = fromRepositoryRoot
+  const fromWorkspaceRoot = decoded.startsWith('/') || decoded.startsWith('\\')
+  const directory = fromWorkspaceRoot
     ? []
     : (imageContext.path ?? '').replaceAll('\\', '/').split('/').slice(0, -1)
   const parts = [...directory, ...decoded.replaceAll('\\', '/').split('/')]
@@ -270,7 +270,7 @@ function resolveImageSource(
   }
   const path = normalized.join('/')
   return {
-    kind: 'repository',
+    kind: 'workspace',
     key: `${root}\n${path}`,
     root,
     path,

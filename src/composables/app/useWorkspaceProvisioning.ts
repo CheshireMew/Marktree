@@ -3,40 +3,48 @@ import { open } from '@tauri-apps/plugin-dialog'
 import { watch, type Ref } from 'vue'
 
 import type { useWorkspace } from '@/composables/useWorkspace'
+import { i18n } from '@/i18n'
 import { isTauri, nativeApi } from '@/lib/api'
 import { readableError } from '@/lib/errors'
 import type { WorktreeDescriptor } from '@/types'
 
-import type { AppModal, RepositoryDialogForm } from './dialogState'
+import type { AppModal, WorkspaceDialogForm } from './dialogState'
 
 type Workspace = ReturnType<typeof useWorkspace>
 
-export function useRepositoryProvisioning(
+export function useWorkspaceProvisioning(
   workspace: Workspace,
   modal: Ref<AppModal | undefined>,
-  form: RepositoryDialogForm,
+  form: WorkspaceDialogForm,
   nativeAndroid: Ref<boolean>,
   addMenuOpen: Ref<boolean>,
   cloneCredentialId: Ref<string | undefined>,
   prepareCloneCredentials: () => Promise<void>,
   closeModal: () => void,
 ) {
-  async function chooseRepository(action: 'open' | 'initialize') {
+  async function chooseWorkspace(action: 'open' | 'create') {
     addMenuOpen.value = false
     if (!isTauri()) return
-    if (nativeAndroid.value && action === 'initialize') {
-      form.repositoryName = ''
-      modal.value = 'mobileRepository'
+    if (nativeAndroid.value && action === 'create') {
+      form.workspaceName = ''
+      modal.value = 'mobileWorkspace'
       return
     }
     try {
       const selected = await open({ directory: true, multiple: false })
       if (!selected) return
+      let path = selected
+      if (action === 'create') {
+        const name = window.prompt(i18n.global.t('app.workspaceName'))
+        if (!name?.trim()) return
+        const separator = selected.includes('\\') ? '\\' : '/'
+        path = `${selected}${separator}${name.trim()}`
+      }
       const descriptor =
         action === 'open'
-          ? await nativeApi.openRepository({ path: selected })
-          : await nativeApi.initializeRepository({ path: selected })
-      await workspace.addRepository(descriptor)
+          ? await nativeApi.openWorkspace({ path })
+          : await nativeApi.createWorkspace({ path })
+      await workspace.addWorkspace(descriptor)
     } catch (reason) {
       workspace.error.value = readableError(reason)
     }
@@ -55,11 +63,11 @@ export function useRepositoryProvisioning(
     addMenuOpen.value = false
     modal.value = 'clone'
     form.remoteUrl = ''
-    form.repositoryName = ''
+    form.workspaceName = ''
     await prepareCloneCredentials()
   }
 
-  async function cloneRepository() {
+  async function cloneGitWorkspace() {
     if (!form.remoteUrl.trim() || (!nativeAndroid.value && !form.destination.trim())) {
       return
     }
@@ -75,42 +83,42 @@ export function useRepositoryProvisioning(
         })
       }
       const inferredName =
-        form.repositoryName.trim() ||
+        form.workspaceName.trim() ||
         form.remoteUrl.split('/').at(-1)?.replace(/\.git$/i, '') ||
-        'repository'
+        'workspace'
       const descriptor = nativeAndroid.value
-        ? await nativeApi.cloneMobileRepository({
+        ? await nativeApi.cloneMobileGitWorkspace({
             remoteUrl: form.remoteUrl.trim(),
-            repositoryName: inferredName,
+            workspaceName: inferredName,
             credentialId: cloneCredentialId.value ?? null,
           })
-        : await nativeApi.cloneRepository({
+        : await nativeApi.cloneGitWorkspace({
             remoteUrl: form.remoteUrl.trim(),
             path: form.destination.trim(),
             credentialId: cloneCredentialId.value ?? null,
           })
-      await workspace.addRepository(descriptor)
+      await workspace.addWorkspace(descriptor)
       closeModal()
     } catch (reason) {
       workspace.error.value = readableError(reason)
     }
   }
 
-  async function initializeMobileRepository() {
-    if (!form.repositoryName.trim()) return
+  async function createMobileWorkspace() {
+    if (!form.workspaceName.trim()) return
     try {
-      const descriptor = await nativeApi.initializeMobileRepository({
-        repositoryName: form.repositoryName.trim(),
+      const descriptor = await nativeApi.createMobileWorkspace({
+        workspaceName: form.workspaceName.trim(),
       })
-      await workspace.addRepository(descriptor)
+      await workspace.addWorkspace(descriptor)
       closeModal()
     } catch (reason) {
       workspace.error.value = readableError(reason)
     }
   }
 
-  function openNewDocument() {
-    form.documentPath = ''
+  function openNewDocument(directory = '') {
+    form.documentPath = directory ? `${directory}/` : ''
     modal.value = 'document'
   }
 
@@ -120,8 +128,8 @@ export function useRepositoryProvisioning(
   }
 
   function openWorktreeDialog() {
-    const repository = workspace.activeRepository.value
-    if (!repository) return
+    const activeWorkspace = workspace.activeWorkspace.value
+    if (!activeWorkspace?.git) return
     form.worktreeName = ''
     form.worktreeBranch = ''
     form.worktreeStart = workspace.activeWorktree.value?.branch ?? 'HEAD'
@@ -132,22 +140,22 @@ export function useRepositoryProvisioning(
   watch(
     () => form.worktreeName,
     (name) => {
-      const repository = workspace.activeRepository.value
-      if (!repository || !name.trim()) return
-      const separator = repository.root.includes('\\') ? '\\' : '/'
-      const parent = repository.root.replace(/[\\/][^\\/]+$/, '')
-      form.worktreePath = `${parent}${separator}${repository.name}-${name.trim()}`
+      const activeWorkspace = workspace.activeWorkspace.value
+      if (!activeWorkspace?.git || !name.trim()) return
+      const separator = activeWorkspace.root.includes('\\') ? '\\' : '/'
+      const parent = activeWorkspace.root.replace(/[\\/][^\\/]+$/, '')
+      form.worktreePath = `${parent}${separator}${activeWorkspace.name}-${name.trim()}`
       if (!form.worktreeBranch) form.worktreeBranch = name.trim()
     },
   )
 
   async function createWorktree() {
-    const repository = workspace.activeRepository.value
-    if (!repository) return
+    const activeWorkspace = workspace.activeWorkspace.value
+    if (!activeWorkspace?.git) return
     try {
       await nativeApi.createWorktree({
         request: {
-          root: repository.root,
+          root: activeWorkspace.root,
           name: form.worktreeName.trim(),
           path: form.worktreePath.trim(),
           branch: form.worktreeBranch.trim(),
@@ -166,12 +174,13 @@ export function useRepositoryProvisioning(
     try {
       const label = `workspace-${crypto.randomUUID()}`
       new WebviewWindow(label, {
-        url: `/?root=${encodeURIComponent(worktree.path)}`,
-        title: `${workspace.activeRepository.value?.name ?? 'Marktree'} · ${worktree.name}`,
+        url: `/?root=${encodeURIComponent(workspace.activeWorkspace.value?.root ?? worktree.path)}&worktree=${encodeURIComponent(worktree.path)}`,
+        title: `${workspace.activeWorkspace.value?.name ?? 'Marktree'} · ${worktree.name}`,
         width: 1280,
         height: 820,
         minWidth: 900,
         minHeight: 600,
+        decorations: false,
       })
     } catch (reason) {
       workspace.error.value = readableError(reason)
@@ -179,11 +188,11 @@ export function useRepositoryProvisioning(
   }
 
   return {
-    chooseRepository,
+    chooseWorkspace,
     chooseCloneDestination,
     openCloneDialog,
-    cloneRepository,
-    initializeMobileRepository,
+    cloneGitWorkspace,
+    createMobileWorkspace,
     openNewDocument,
     createDocument,
     openWorktreeDialog,

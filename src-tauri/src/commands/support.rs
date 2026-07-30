@@ -5,8 +5,8 @@ use crate::{
     error::AppResult,
     git,
     paths::paths_equal,
-    state::{PersistentState, RepositoryRuntime},
-    types::{GitOperationPhase, RepositoryDescriptor, SyncResult, SyncStage},
+    state::{PersistentState, WorkspaceRuntime},
+    types::{GitCapability, GitOperationPhase, SyncResult, SyncStage},
 };
 
 pub(super) fn credential_for_root(
@@ -31,7 +31,7 @@ pub(super) fn with_sync_credential(
             SyncStage::Credential,
             error,
             state
-                .managed_changes(root)
+                .workspace_changes(root)
                 .into_iter()
                 .map(|change| change.path)
                 .collect(),
@@ -72,21 +72,21 @@ pub(super) fn ensure_worktree_idle(state: &PersistentState, root: &str) -> AppRe
     }
 }
 
-pub(super) fn ensure_repository_idle_for_root(
+pub(super) fn ensure_git_idle_for_root(
     state: &PersistentState,
     root: &str,
     allowed_root: Option<&str>,
 ) -> AppResult<()> {
-    let descriptor = git::refresh_repository(root)?;
-    ensure_repository_idle(state, &descriptor, allowed_root)
+    let capability = git::refresh_repository(root)?;
+    ensure_git_idle(state, &capability, allowed_root)
 }
 
-pub(super) fn ensure_repository_idle(
+pub(super) fn ensure_git_idle(
     state: &PersistentState,
-    descriptor: &RepositoryDescriptor,
+    capability: &GitCapability,
     allowed_root: Option<&str>,
 ) -> AppResult<()> {
-    for worktree in &descriptor.worktrees {
+    for worktree in &capability.worktrees {
         if allowed_root.is_some_and(|allowed| paths_equal(allowed, &worktree.path)) {
             continue;
         }
@@ -99,19 +99,19 @@ pub(super) fn ensure_repository_idle(
     Ok(())
 }
 
-pub(super) fn with_repository_lock<T>(
-    runtime: &RepositoryRuntime,
+pub(super) fn with_workspace_lock<T>(
+    runtime: &WorkspaceRuntime,
     root: &str,
     operation: impl FnOnce() -> AppResult<T>,
 ) -> AppResult<T> {
     let key = git::repository_lock_key(root);
-    let mutex = runtime.repository_mutex(&key);
+    let mutex = runtime.workspace_mutex(&key);
     let _guard = mutex.lock();
     operation()
 }
 
-pub(super) fn with_two_repository_locks<T>(
-    runtime: &RepositoryRuntime,
+pub(super) fn with_two_workspace_locks<T>(
+    runtime: &WorkspaceRuntime,
     left_root: &str,
     right_root: &str,
     operation: impl FnOnce() -> AppResult<T>,
@@ -121,17 +121,17 @@ pub(super) fn with_two_repository_locks<T>(
         git::repository_lock_key(right_root),
     ];
     keys.sort();
-    let first = runtime.repository_mutex(&keys[0]);
+    let first = runtime.workspace_mutex(&keys[0]);
     let _first_guard = first.lock();
     if keys[0] == keys[1] {
         return operation();
     }
-    let second = runtime.repository_mutex(&keys[1]);
+    let second = runtime.workspace_mutex(&keys[1]);
     let _second_guard = second.lock();
     operation()
 }
 
-pub(super) fn mobile_repository_path(app: &AppHandle, name: &str) -> AppResult<std::path::PathBuf> {
+pub(super) fn mobile_workspace_path(app: &AppHandle, name: &str) -> AppResult<std::path::PathBuf> {
     let normalized = name
         .trim()
         .chars()
@@ -147,12 +147,12 @@ pub(super) fn mobile_repository_path(app: &AppHandle, name: &str) -> AppResult<s
         .to_owned();
     if normalized.is_empty() {
         return Err(crate::error::AppError::Message(
-            "A repository name is required.".to_owned(),
+            "A workspace name is required.".to_owned(),
         ));
     }
     Ok(app
         .path()
         .app_data_dir()?
-        .join("repositories")
+        .join("workspaces")
         .join(normalized))
 }

@@ -10,13 +10,10 @@ use serde::{Deserialize, Serialize};
 use crate::{
     error::{AppError, AppResult},
     paths::atomic_write,
-    types::{
-        GitOperationPhase, LocalStateSnapshot, ManagedChange, ManagedChangeKind,
-        PendingGitOperation,
-    },
+    types::{LocalStateSnapshot, PendingGitOperation, WorkspaceChange, WorkspaceChangeOperation},
 };
 
-const STATE_SCHEMA_VERSION: u32 = 5;
+const STATE_SCHEMA_VERSION: u32 = 6;
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(default)]
@@ -24,8 +21,8 @@ const STATE_SCHEMA_VERSION: u32 = 5;
 struct LocalState {
     schema_version: u32,
     next_generation: u64,
-    repositories: Vec<String>,
-    managed_changes: BTreeMap<String, BTreeMap<String, ManagedChange>>,
+    workspaces: Vec<String>,
+    workspace_changes: BTreeMap<String, BTreeMap<String, WorkspaceChange>>,
     pending_git_operations: BTreeMap<String, PendingGitOperation>,
     recent_files: Vec<String>,
     credential_refs: BTreeMap<String, String>,
@@ -36,8 +33,8 @@ impl Default for LocalState {
         Self {
             schema_version: STATE_SCHEMA_VERSION,
             next_generation: 1,
-            repositories: Vec::new(),
-            managed_changes: BTreeMap::new(),
+            workspaces: Vec::new(),
+            workspace_changes: BTreeMap::new(),
             pending_git_operations: BTreeMap::new(),
             recent_files: Vec::new(),
             credential_refs: BTreeMap::new(),
@@ -57,9 +54,12 @@ impl PersistentState {
         fs::create_dir_all(app_data_dir)?;
         let file_path = app_data_dir.join("state.json");
         let backup_path = app_data_dir.join("state.backup.json");
-        let inner = match (load_valid_state(&file_path), load_valid_state(&backup_path)) {
+        let (inner, migrated) = match (load_valid_state(&file_path), load_valid_state(&backup_path))
+        {
             (Some(state), _) | (None, Some(state)) => state,
-            (None, None) if !file_path.exists() && !backup_path.exists() => LocalState::default(),
+            (None, None) if !file_path.exists() && !backup_path.exists() => {
+                (LocalState::default(), false)
+            }
             (None, None) => {
                 return Err(AppError::Message(format!(
                 "Marktree local state is unreadable. The files were preserved at '{}' and '{}'.",
@@ -68,33 +68,37 @@ impl PersistentState {
             )))
             }
         };
-        Ok(Self {
+        let state = Self {
             file_path,
             backup_path,
             app_data_dir: app_data_dir.to_path_buf(),
             inner: Mutex::new(inner),
-        })
+        };
+        if migrated {
+            state.persist(&state.inner.lock())?;
+        }
+        Ok(state)
     }
 
-    pub fn register_repository(&self, root: &str) -> AppResult<()> {
+    pub fn register_workspace(&self, root: &str) -> AppResult<()> {
         self.update(|state| {
-            if !state.repositories.iter().any(|value| value == root) {
-                state.repositories.push(root.to_owned());
+            if !state.workspaces.iter().any(|value| value == root) {
+                state.workspaces.push(root.to_owned());
             }
         })
     }
 
-    pub fn forget_repository(
+    pub fn forget_workspace(
         &self,
-        repository_root: &str,
-        worktree_roots: &[String],
+        workspace_root: &str,
+        roots: &[String],
         credential_key: &str,
     ) -> AppResult<()> {
         self.update(|state| {
-            state.repositories.retain(|value| value != repository_root);
+            state.workspaces.retain(|value| value != workspace_root);
             state.credential_refs.remove(credential_key);
-            for root in worktree_roots {
-                state.managed_changes.remove(root);
+            for root in roots {
+                state.workspace_changes.remove(root);
                 state.pending_git_operations.remove(root);
                 state
                     .recent_files
@@ -103,25 +107,25 @@ impl PersistentState {
         })
     }
 
-    pub fn record_change(
+    pub fn record_workspace_change(
         &self,
         root: &str,
         path: &str,
-        sha256: &str,
-        kind: ManagedChangeKind,
-    ) -> AppResult<ManagedChange> {
+        operation: WorkspaceChangeOperation,
+        version: Option<&str>,
+    ) -> AppResult<WorkspaceChange> {
         let mut recorded = None;
         self.update(|state| {
             let generation = state.next_generation;
             state.next_generation = state.next_generation.saturating_add(1);
-            let change = ManagedChange {
+            let change = WorkspaceChange {
                 path: path.to_owned(),
-                sha256: sha256.to_owned(),
                 generation,
-                kind,
+                operation,
+                version: version.map(str::to_owned),
             };
             state
-                .managed_changes
+                .workspace_changes
                 .entry(root.to_owned())
                 .or_default()
                 .insert(path.to_owned(), change.clone());
@@ -130,29 +134,34 @@ impl PersistentState {
         recorded.ok_or_else(|| AppError::Message("Failed to record the saved change.".to_owned()))
     }
 
-    pub fn managed_changes(&self, root: &str) -> Vec<ManagedChange> {
+    pub fn workspace_changes(&self, root: &str) -> Vec<WorkspaceChange> {
         self.inner
             .lock()
-            .managed_changes
+            .workspace_changes
             .get(root)
             .map(|changes| changes.values().cloned().collect())
             .unwrap_or_default()
     }
 
-    pub fn clear_managed_changes(&self, root: &str, completed: &[ManagedChange]) -> AppResult<()> {
+    pub fn clear_workspace_changes(
+        &self,
+        root: &str,
+        completed: &[WorkspaceChange],
+    ) -> AppResult<()> {
         self.update(|state| {
-            if let Some(current) = state.managed_changes.get_mut(root) {
+            if let Some(current) = state.workspace_changes.get_mut(root) {
                 for change in completed {
                     let unchanged = current.get(&change.path).is_some_and(|candidate| {
                         candidate.generation == change.generation
-                            && candidate.sha256 == change.sha256
+                            && candidate.operation == change.operation
+                            && candidate.version == change.version
                     });
                     if unchanged {
                         current.remove(&change.path);
                     }
                 }
                 if current.is_empty() {
-                    state.managed_changes.remove(root);
+                    state.workspace_changes.remove(root);
                 }
             }
         })
@@ -257,9 +266,9 @@ impl PersistentState {
     pub fn snapshot(&self) -> LocalStateSnapshot {
         let state = self.inner.lock();
         LocalStateSnapshot {
-            repositories: state.repositories.clone(),
-            managed_changes: state
-                .managed_changes
+            workspaces: state.workspaces.clone(),
+            workspace_changes: state
+                .workspace_changes
                 .iter()
                 .map(|(root, changes)| {
                     (root.clone(), changes.values().cloned().collect::<Vec<_>>())
@@ -295,22 +304,85 @@ impl PersistentState {
     }
 }
 
-fn load_valid_state(path: &Path) -> Option<LocalState> {
-    let mut state = serde_json::from_slice::<LocalState>(&fs::read(path).ok()?).ok()?;
-    match state.schema_version {
-        STATE_SCHEMA_VERSION => Some(state),
-        2..=4 => {
-            for operation in state.pending_git_operations.values_mut() {
-                if operation.stash_oid.is_some()
-                    && !operation.stash_applied
-                    && operation.phase == GitOperationPhase::RestoreWorkingTree
-                {
-                    operation.stash_apply_started = true;
-                }
-            }
-            state.schema_version = STATE_SCHEMA_VERSION;
-            Some(state)
-        }
-        _ => None,
+fn load_valid_state(path: &Path) -> Option<(LocalState, bool)> {
+    let mut value = serde_json::from_slice::<serde_json::Value>(&fs::read(path).ok()?).ok()?;
+    let schema_version = value.get("schemaVersion")?.as_u64()? as u32;
+    if schema_version == 5 {
+        migrate_schema_five(&mut value)?;
+        return serde_json::from_value(value)
+            .ok()
+            .map(|state| (state, true));
     }
+    if schema_version != STATE_SCHEMA_VERSION {
+        return None;
+    }
+    serde_json::from_value(value)
+        .ok()
+        .map(|state| (state, false))
+}
+
+fn migrate_schema_five(value: &mut serde_json::Value) -> Option<()> {
+    let object = value.as_object_mut()?;
+    let workspaces = object
+        .remove("repositories")
+        .unwrap_or_else(|| serde_json::Value::Array(Vec::new()));
+    object.insert("workspaces".to_owned(), workspaces);
+    let changes = object
+        .remove("managedChanges")
+        .unwrap_or_else(|| serde_json::json!({}));
+    object.insert("workspaceChanges".to_owned(), migrate_change_map(changes)?);
+    if let Some(operations) = object
+        .get_mut("pendingGitOperations")
+        .and_then(serde_json::Value::as_object_mut)
+    {
+        for operation in operations.values_mut() {
+            let operation = operation.as_object_mut()?;
+            let changes = operation
+                .remove("managedChanges")
+                .unwrap_or_else(|| serde_json::Value::Array(Vec::new()));
+            operation.insert(
+                "workspaceChanges".to_owned(),
+                migrate_change_array(changes)?,
+            );
+        }
+    }
+    object.insert(
+        "schemaVersion".to_owned(),
+        serde_json::Value::from(STATE_SCHEMA_VERSION),
+    );
+    Some(())
+}
+
+fn migrate_change_map(value: serde_json::Value) -> Option<serde_json::Value> {
+    let mut result = serde_json::Map::new();
+    for (root, changes) in value.as_object()? {
+        let mut migrated = serde_json::Map::new();
+        for (path, change) in changes.as_object()? {
+            migrated.insert(path.clone(), migrate_change(change.clone())?);
+        }
+        result.insert(root.clone(), serde_json::Value::Object(migrated));
+    }
+    Some(serde_json::Value::Object(result))
+}
+
+fn migrate_change_array(value: serde_json::Value) -> Option<serde_json::Value> {
+    let values = value
+        .as_array()?
+        .iter()
+        .cloned()
+        .map(migrate_change)
+        .collect::<Option<Vec<_>>>()?;
+    Some(serde_json::Value::Array(values))
+}
+
+fn migrate_change(mut value: serde_json::Value) -> Option<serde_json::Value> {
+    let change = value.as_object_mut()?;
+    let version = change.remove("sha256").unwrap_or(serde_json::Value::Null);
+    change.remove("kind");
+    change.insert(
+        "operation".to_owned(),
+        serde_json::Value::String("upsert".to_owned()),
+    );
+    change.insert("version".to_owned(), version);
+    Some(value)
 }

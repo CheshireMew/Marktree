@@ -17,7 +17,7 @@ import {
   sourceLineSeparator,
   sourceOffsetFromEditor,
 } from '@/lib/sourceText'
-import type { RepositoryImageLoader } from '@/types'
+import type { WorkspaceImageLoader } from '@/types'
 
 const props = defineProps<{
   modelValue: string
@@ -25,7 +25,8 @@ const props = defineProps<{
   dark?: boolean
   root?: string
   path?: string
-  loadRepositoryImage: RepositoryImageLoader
+  markdown?: boolean
+  loadWorkspaceImage: WorkspaceImageLoader
 }>()
 
 const emit = defineEmits<{
@@ -38,6 +39,7 @@ const editableCompartment = new Compartment()
 const themeCompartment = new Compartment()
 const lineSeparatorCompartment = new Compartment()
 const previewCompartment = new Compartment()
+const languageCompartment = new Compartment()
 let editor: EditorView | undefined
 let currentLineSeparator = detectLineSeparator(props.modelValue)
 let currentSource = props.modelValue
@@ -49,7 +51,7 @@ function handleFiles(event: ClipboardEvent | DragEvent, view: EditorView) {
       ? [...(event.clipboardData?.files ?? [])]
       : [...(event.dataTransfer?.files ?? [])]
   const image = files.find((file) => file.type.startsWith('image/'))
-  if (!image) return false
+  if (!image || !props.markdown) return false
   event.preventDefault()
   emit(
     'asset',
@@ -68,14 +70,18 @@ onMounted(() => {
       extensions: [
         basicSetup,
         keymap.of([...defaultKeymap, ...historyKeymap, indentWithTab]),
-        markdown({ extensions: [GFM] }),
+        languageCompartment.of(
+          props.markdown ? markdown({ extensions: [GFM] }) : [],
+        ),
         EditorView.lineWrapping,
         previewCompartment.of(
-          markdownPreviewExtensions({
-            root: props.root,
-            path: props.path,
-            loadRepositoryImage: props.loadRepositoryImage,
-          }),
+          props.markdown
+            ? markdownPreviewExtensions({
+                root: props.root,
+                path: props.path,
+                loadWorkspaceImage: props.loadWorkspaceImage,
+              })
+            : [],
         ),
         lineSeparatorCompartment.of(sourceLineSeparator(props.modelValue)),
         editableCompartment.of(EditorView.editable.of(!props.readOnly)),
@@ -141,16 +147,23 @@ watch(
 )
 
 watch(
-  () => [props.root, props.path] as const,
-  ([root, path]) => {
+  () => [props.root, props.path, props.markdown] as const,
+  ([root, path, isMarkdown]) => {
     editor?.dispatch({
-      effects: previewCompartment.reconfigure(
-        markdownPreviewExtensions({
-          root,
-          path,
-          loadRepositoryImage: props.loadRepositoryImage,
-        }),
-      ),
+      effects: [
+        languageCompartment.reconfigure(
+          isMarkdown ? markdown({ extensions: [GFM] }) : [],
+        ),
+        previewCompartment.reconfigure(
+          isMarkdown
+            ? markdownPreviewExtensions({
+                root,
+                path,
+                loadWorkspaceImage: props.loadWorkspaceImage,
+              })
+            : [],
+        ),
+      ],
     })
   },
 )

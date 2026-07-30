@@ -16,7 +16,8 @@ use super::{
         stash_touched_paths_are_dirty,
     },
     sync_commit::{
-        align_index_paths_to_head, commit_only_paths, find_operation_commit, tracked_marktree_paths,
+        align_index_paths_to_head, commit_only_paths, find_operation_commit,
+        tracked_workspace_paths,
     },
 };
 use crate::{
@@ -39,7 +40,7 @@ pub fn pull_rebase(
 
 pub fn sync_plan(root: &str, app_state: &PersistentState) -> AppResult<SyncPlan> {
     let repo = Repository::open(root)?;
-    let changed_paths = tracked_marktree_paths(&repo, &app_state.managed_changes(root))?;
+    let changed_paths = tracked_workspace_paths(&repo, &app_state.workspace_changes(root))?;
     let remote_url = super::remote::remote_url(&repo);
     Ok(SyncPlan {
         root: workdir_string(&repo)?,
@@ -50,7 +51,7 @@ pub fn sync_plan(root: &str, app_state: &PersistentState) -> AppResult<SyncPlan>
     })
 }
 
-pub fn sync_marktree_changes(
+pub fn sync_workspace_changes(
     root: &str,
     credential: Option<CredentialRecord>,
     app_state: &PersistentState,
@@ -213,8 +214,8 @@ fn start_or_resume_git_operation(
         }
         return drive_git_operation(operation, credential, app_state);
     }
-    let managed_changes = if kind == GitOperationKind::Sync {
-        app_state.managed_changes(root)
+    let workspace_changes = if kind == GitOperationKind::Sync {
+        app_state.workspace_changes(root)
     } else {
         Vec::new()
     };
@@ -228,7 +229,7 @@ fn start_or_resume_git_operation(
         kind,
         phase: GitOperationPhase::Prepare,
         started_at: Utc::now().to_rfc3339(),
-        managed_changes,
+        workspace_changes,
         changed_paths: Vec::new(),
         committed: false,
         commit_id: None,
@@ -257,7 +258,7 @@ fn drive_git_operation(
         match operation.phase {
             GitOperationPhase::Prepare => {
                 if operation.kind == GitOperationKind::Sync {
-                    let paths = match tracked_marktree_paths(&repo, &operation.managed_changes) {
+                    let paths = match tracked_workspace_paths(&repo, &operation.workspace_changes) {
                         Ok(paths) => paths,
                         Err(error) => {
                             let result = operation_failure(&operation, SyncStage::Prepare, error);
@@ -483,8 +484,8 @@ fn drive_git_operation(
                     app_state.update_git_operation(operation.clone())?;
                 }
                 if operation.kind == GitOperationKind::Sync {
-                    if let Err(error) =
-                        app_state.clear_managed_changes(&operation.root, &operation.managed_changes)
+                    if let Err(error) = app_state
+                        .clear_workspace_changes(&operation.root, &operation.workspace_changes)
                     {
                         return Ok(operation_failure(&operation, SyncStage::Finalize, error));
                     }

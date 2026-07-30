@@ -6,7 +6,7 @@
   max-height: 94vh;
 }
 
-.repository-lifecycle {
+.workspace-lifecycle {
   justify-content: space-between;
   border-top: 1px solid var(--border);
   padding-top: 12px;

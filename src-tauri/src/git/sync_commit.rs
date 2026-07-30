@@ -1,19 +1,18 @@
-use std::{collections::BTreeSet, path::Path};
+use std::path::Path;
 
 use git2::{Index, Oid, Repository};
 
 use crate::{
-    content_policy::is_marktree_managed_path,
     error::{AppError, AppResult},
     file_version::verify_expected_version,
     paths::{
         canonical_root, normalize_relative, normalize_relative_paths, resolve_existing_file,
         resolve_for_write,
     },
-    types::{ManagedChange, SyncStage},
+    types::{SyncStage, WorkspaceChange, WorkspaceChangeOperation},
 };
 
-use super::repository::{signature, status_snapshot, workdir};
+use super::repository::{signature, workdir};
 
 pub(super) fn commit_only_paths(
     repo: &Repository,
@@ -103,7 +102,7 @@ pub(super) fn commit_only_paths(
     {
         return Err(IsolatedCommitError::new(
             SyncStage::Commit,
-            AppError::Message("There are no Marktree changes to commit.".to_owned()),
+            AppError::Message("There are no workspace changes to commit.".to_owned()),
         ));
     }
     let tree = repo
@@ -122,8 +121,10 @@ pub(super) fn commit_only_paths(
             &parent_refs,
         )
         .map_err(|error| IsolatedCommitError::new(SyncStage::Commit, error))?;
-    align_index_paths_to_head(repo, &normalized)
-        .map_err(|error| IsolatedCommitError::new(SyncStage::Finalize, error))?;
+    if !normalized.is_empty() {
+        align_index_paths_to_head(repo, &normalized)
+            .map_err(|error| IsolatedCommitError::new(SyncStage::Finalize, error))?;
+    }
     Ok(oid)
 }
 
@@ -160,29 +161,43 @@ pub(super) fn align_index_paths_to_head(repo: &Repository, paths: &[String]) -> 
     Ok(())
 }
 
-pub(super) fn tracked_marktree_paths(
+pub(super) fn tracked_workspace_paths(
     repo: &Repository,
-    changes: &[ManagedChange],
+    changes: &[WorkspaceChange],
 ) -> AppResult<Vec<String>> {
-    let statuses = status_snapshot(repo)?;
     let root = canonical_root(workdir(repo)?.to_string_lossy().as_ref())?;
-    let changed: BTreeSet<&str> = statuses
-        .files
-        .iter()
-        .map(|file| file.path.as_str())
-        .collect();
     let mut result = Vec::new();
     for change in changes {
         let path = normalize_relative(&change.path)?;
-        if changed.contains(path.as_str()) && is_marktree_managed_path(&path) {
-            let absolute = resolve_existing_file(&root, &path)
-                .map_err(|_| AppError::ManagedContentChanged { path: path.clone() })?;
-            verify_expected_version(&absolute, Some(&change.sha256), false)
-                .map_err(|_| AppError::ManagedContentChanged { path: path.clone() })?;
-            result.push(path);
+        if repo.status_file(Path::new(&path))? == git2::Status::CURRENT {
+            continue;
         }
+        match change.operation {
+            WorkspaceChangeOperation::Upsert => {
+                let version = change
+                    .version
+                    .as_deref()
+                    .ok_or_else(|| AppError::ManagedContentChanged { path: path.clone() })?;
+                let absolute = resolve_existing_file(&root, &path)
+                    .map_err(|_| AppError::ManagedContentChanged { path: path.clone() })?;
+                verify_expected_version(&absolute, Some(version), false)
+                    .map_err(|_| AppError::ManagedContentChanged { path: path.clone() })?;
+            }
+            WorkspaceChangeOperation::Delete => {
+                let absolute = resolve_for_write(&root, &path)?;
+                if absolute.exists() {
+                    return Err(AppError::ManagedContentChanged { path });
+                }
+            }
+        }
+        result.push(path);
     }
     Ok(result)
+}
+
+pub fn commit_workspace_baseline(root: &str, paths: &[String]) -> AppResult<Oid> {
+    let repo = Repository::open(root)?;
+    commit_only_paths(&repo, paths, "Marktree workspace baseline").map_err(|error| error.error)
 }
 
 #[derive(Debug)]

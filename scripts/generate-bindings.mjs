@@ -13,7 +13,7 @@ const sourcePaths = [
   path.join(root, 'src-tauri', 'src', 'error.rs'),
   path.join(root, 'src-tauri', 'src', 'auth.rs'),
 ]
-const commandSourcePaths = ['auth', 'documents', 'git', 'repositories'].map((name) =>
+const commandSourcePaths = ['auth', 'documents', 'git', 'workspaces'].map((name) =>
   path.join(root, 'src-tauri', 'src', 'commands', `${name}.rs`),
 )
 const registryPath = path.join(root, 'src-tauri', 'src', 'ipc_commands.list')

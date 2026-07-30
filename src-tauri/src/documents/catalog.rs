@@ -4,68 +4,68 @@ use globset::GlobSet;
 use walkdir::{DirEntry, WalkDir};
 
 use super::{
-    config::{build_ignore_set, read_repository_config},
+    config::{build_ignore_set, read_workspace_config},
     content::modified_ms,
 };
 use crate::{
     content_policy::document_kind,
     error::{AppError, AppResult},
     paths::{canonical_root, path_to_slashes},
-    types::{DocumentDescriptor, DocumentKind, GitFileStatus},
+    types::{DocumentKind, GitFileStatus, WorkspaceEntry, WorkspaceEntryType},
 };
 
-pub fn list_documents(
+pub fn list_workspace_entries(
     root: &str,
     statuses: &[GitFileStatus],
-) -> AppResult<Vec<DocumentDescriptor>> {
+) -> AppResult<Vec<WorkspaceEntry>> {
     let status_map: BTreeMap<&str, &GitFileStatus> = statuses
         .iter()
         .map(|status| (status.path.as_str(), status))
         .collect();
-    let mut documents = Vec::new();
-    scan_repository_files(
+    let mut entries = Vec::new();
+    scan_workspace_entries(
         root,
         || true,
         |entry, relative_string| {
-            if matches!(relative_string, ".git" | ".marktree/config.json") {
-                return Ok(true);
-            }
             let metadata = entry
                 .metadata()
                 .map_err(|error| AppError::Io(error.into()))?;
-            let kind = document_kind(entry.path());
-            let read_only = kind != DocumentKind::Markdown;
+            let is_directory = entry.file_type().is_dir();
+            let kind = (!is_directory).then(|| document_kind(entry.path()));
             let name = entry.file_name().to_string_lossy().into_owned();
-            let extension = entry
-                .path()
-                .extension()
-                .map(|value| value.to_string_lossy().to_ascii_lowercase())
-                .unwrap_or_default();
-
-            documents.push(DocumentDescriptor {
+            let read_only = !matches!(kind, Some(DocumentKind::Markdown | DocumentKind::Text));
+            entries.push(WorkspaceEntry {
                 path: relative_string.to_owned(),
                 name,
-                extension,
-                size: metadata.len(),
+                entry_type: if is_directory {
+                    WorkspaceEntryType::Directory
+                } else {
+                    WorkspaceEntryType::File
+                },
+                file_kind: kind,
+                size: if is_directory { 0 } else { metadata.len() },
                 modified_ms: modified_ms(&metadata),
                 read_only,
-                kind,
-                git_status: status_map
-                    .get(relative_string)
-                    .map(|value| (*value).clone()),
+                git_status: (!is_directory)
+                    .then(|| {
+                        status_map
+                            .get(relative_string)
+                            .map(|value| (*value).clone())
+                    })
+                    .flatten(),
             });
             Ok(true)
         },
     )?;
 
-    documents.sort_by(|left, right| {
-        let left_rank = kind_rank(&left.kind);
-        let right_rank = kind_rank(&right.kind);
+    entries.sort_by(|left, right| {
+        let left_rank = u8::from(left.entry_type == WorkspaceEntryType::File);
+        let right_rank = u8::from(right.entry_type == WorkspaceEntryType::File);
         left_rank
             .cmp(&right_rank)
             .then_with(|| left.path.to_lowercase().cmp(&right.path.to_lowercase()))
     });
-    Ok(documents)
+    Ok(entries)
 }
 
 pub fn search_documents(
@@ -79,8 +79,11 @@ pub fn search_documents(
         return Ok(Vec::new());
     }
     let mut matches = Vec::new();
-    scan_repository_files(root, is_current, |entry, relative| {
-        if document_kind(entry.path()) != DocumentKind::Markdown {
+    scan_workspace_files(root, is_current, |entry, relative| {
+        if !matches!(
+            document_kind(entry.path()),
+            DocumentKind::Markdown | DocumentKind::Text
+        ) {
             return Ok(true);
         }
         let path_match = relative.to_lowercase().contains(&needle);
@@ -104,13 +107,27 @@ pub fn search_documents(
     Ok(matches)
 }
 
-fn scan_repository_files(
+pub fn scan_workspace_files(
+    root: &str,
+    is_current: impl Fn() -> bool,
+    mut visit: impl FnMut(&DirEntry, &str) -> AppResult<bool>,
+) -> AppResult<()> {
+    scan_workspace_entries(root, is_current, |entry, relative| {
+        if entry.file_type().is_file() {
+            visit(entry, relative)
+        } else {
+            Ok(true)
+        }
+    })
+}
+
+pub fn scan_workspace_entries(
     root: &str,
     is_current: impl Fn() -> bool,
     mut visit: impl FnMut(&DirEntry, &str) -> AppResult<bool>,
 ) -> AppResult<()> {
     let root_path = canonical_root(root)?;
-    let config = read_repository_config(root)?.config;
+    let config = read_workspace_config(root)?.config;
     let ignore_set = build_ignore_set(&config.ignore_rules)?;
     for entry in WalkDir::new(&root_path)
         .follow_links(false)
@@ -121,7 +138,7 @@ fn scan_repository_files(
             break;
         }
         let entry = entry.map_err(|error| AppError::Io(error.into()))?;
-        if !entry.file_type().is_file() {
+        if entry.depth() == 0 {
             continue;
         }
         let relative = entry
@@ -136,7 +153,7 @@ fn scan_repository_files(
     Ok(())
 }
 
-fn should_descend(entry: &DirEntry, root: &Path, ignore_set: &GlobSet) -> bool {
+pub(super) fn should_descend(entry: &DirEntry, root: &Path, ignore_set: &GlobSet) -> bool {
     if entry.depth() == 0 {
         return true;
     }
@@ -148,20 +165,18 @@ fn should_descend(entry: &DirEntry, root: &Path, ignore_set: &GlobSet) -> bool {
     if ignore_set.is_match(&relative) {
         return false;
     }
+    if relative
+        .split('/')
+        .next()
+        .is_some_and(|part| matches!(part, ".git" | ".marktree"))
+    {
+        return false;
+    }
     if !entry.file_type().is_dir() {
         return true;
     }
     !matches!(
         entry.file_name().to_string_lossy().as_ref(),
-        ".git" | "node_modules" | "target" | "dist" | ".gradle" | ".idea"
+        ".git" | ".marktree" | "node_modules" | "target" | "dist" | ".gradle" | ".idea"
     )
-}
-
-fn kind_rank(kind: &DocumentKind) -> u8 {
-    match kind {
-        DocumentKind::Markdown => 0,
-        DocumentKind::Image => 1,
-        DocumentKind::Text => 2,
-        DocumentKind::Other => 3,
-    }
 }

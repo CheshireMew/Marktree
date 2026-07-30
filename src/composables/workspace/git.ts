@@ -7,6 +7,7 @@ import {
   activeRoot,
   activeStatus,
   activeTab,
+  activeWorkspace,
   diffOpen,
   diffResult,
   ensureSession,
@@ -16,7 +17,7 @@ import {
   updateWorktreeStatus,
 } from './state'
 import { flushAll } from './persistence'
-import { refreshActive } from './repositories'
+import { refreshActive } from './workspaces'
 
 export async function showDiff(mode: DiffMode) {
   const root = activeRoot.value
@@ -71,7 +72,7 @@ export function showUnsavedDiff() {
 
 export async function sync() {
   const root = activeRoot.value
-  if (!root || !isTauri() || syncing.value) return
+  if (!root || !activeWorkspace.value?.git || !isTauri() || syncing.value) return
   syncing.value = true
   try {
     await flushAll(root)
@@ -91,7 +92,7 @@ export async function sync() {
       if (!plan.canPush) {
         throw new Error(i18n.global.t('app.syncUnavailable'))
       }
-      result = await nativeApi.syncMarktreeChanges({ root })
+      result = await nativeApi.syncWorkspaceChanges({ root })
     }
     throwIfSyncFailed(result)
     const session = ensureSession(root)

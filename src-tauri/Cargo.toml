@@ -1,7 +1,7 @@
 [package]
 name = "marktree"
 version = "0.1.0"
-description = "A source-faithful Markdown workspace for Git repositories and worktrees"
+description = "A source-faithful local Markdown and text workspace with optional Git"
 authors = ["Marktree contributors"]
 license = "MIT"
 repository = "https://github.com/CheshireMew/Marktree"
@@ -38,6 +38,7 @@ url = "2.5"
 walkdir = "2.5"
 
 [target.'cfg(target_os = "windows")'.dependencies]
+trash = "5.2"
 windows-native-keyring-store = { version = "1.1", default-features = false }
 windows-sys = { version = "0.61", features = ["Win32_Storage_FileSystem"] }
 

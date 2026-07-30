@@ -2,22 +2,27 @@
 import {
   ArrowDownToLine,
   ArrowUpFromLine,
+  Box,
   Check,
   CircleDot,
   GitBranch,
   GitCommitHorizontal,
   Plus,
   RefreshCw,
+  Settings,
+  SquareArrowOutUpRight,
   Trash2,
 } from 'lucide-vue-next'
 import { computed, ref } from 'vue'
 import { useI18n } from 'vue-i18n'
 
-import type { BranchDescriptor, GitStatusSnapshot } from '@/types'
+import type { BranchDescriptor, GitStatusSnapshot, WorktreeDescriptor } from '@/types'
 
 const props = defineProps<{
   status: GitStatusSnapshot
   branches: BranchDescriptor[]
+  worktrees: WorktreeDescriptor[]
+  activeRoot?: string
 }>()
 
 const emit = defineEmits<{
@@ -27,6 +32,10 @@ const emit = defineEmits<{
   createBranch: [name: string, startPoint?: string]
   checkoutBranch: [name: string]
   deleteBranch: [name: string]
+  selectWorktree: [worktree: WorktreeDescriptor]
+  newWorktree: []
+  openWindow: [worktree: WorktreeDescriptor]
+  settings: []
 }>()
 
 const { t } = useI18n()
@@ -75,6 +84,30 @@ function requestDelete(branch: BranchDescriptor) {
       <span><ArrowUpFromLine :size="14" /> {{ $t('app.ahead', { count: status.ahead }) }}</span>
       <span><ArrowDownToLine :size="14" /> {{ $t('app.behind', { count: status.behind }) }}</span>
     </div>
+    <section class="branch-manager advanced-worktrees">
+      <header class="section-title">
+        <span><Box :size="14" /> {{ $t('app.worktrees') }}</span>
+        <button @click="$emit('newWorktree')"><Plus :size="14" /></button>
+      </header>
+      <div
+        v-for="worktree in worktrees"
+        :key="worktree.path"
+        class="branch-row worktree-row"
+        :class="{ active: worktree.path === activeRoot }"
+        @click="$emit('selectWorktree', worktree)"
+      >
+        <span>
+          <strong>{{ worktree.name }}</strong>
+          <small>{{ worktree.branch ?? $t('app.detachedHead') }}</small>
+        </span>
+        <button @click.stop="$emit('openWindow', worktree)">
+          <SquareArrowOutUpRight :size="13" />
+        </button>
+      </div>
+      <button class="git-settings-button" @click="$emit('settings')">
+        <Settings :size="14" /> {{ $t('app.gitSettings') }}
+      </button>
+    </section>
     <section class="branch-manager">
       <label>
         <span><GitBranch :size="14" /> {{ $t('app.branch') }}</span>

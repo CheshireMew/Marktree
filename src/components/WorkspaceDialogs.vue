@@ -2,20 +2,23 @@
 import type {
   AuthConfiguration,
   GithubDeviceCode,
+  TrashEntry,
 } from '@/types'
 import type {
   AppModal,
-  RepositoryDialogForm,
+  WorkspaceDialogForm,
 } from '@/composables/app/dialogState'
 
 defineProps<{
   modal?: AppModal
-  form: RepositoryDialogForm
+  form: WorkspaceDialogForm
   nativeAndroid: boolean
+  gitEnabled: boolean
   authConfiguration?: AuthConfiguration
   githubDevice?: GithubDeviceCode
   githubPending: boolean
   cloneCredentialId?: string
+  trashEntries: TrashEntry[]
 }>()
 
 defineEmits<{
@@ -24,11 +27,13 @@ defineEmits<{
   clone: []
   beginGithubLogin: []
   createDocument: []
-  initializeMobileRepository: []
+  createMobileWorkspace: []
   createWorktree: []
   saveGenericCredential: []
-  saveRepositoryConfig: []
-  forgetActiveRepository: []
+  saveWorkspaceConfig: []
+  forgetActiveWorkspace: []
+  restoreTrash: [id: string]
+  emptyTrash: []
 }>()
 </script>
 
@@ -48,20 +53,20 @@ defineEmits<{
         />
       </label>
       <label v-if="nativeAndroid">
-        <span>{{ $t('app.repositoryName') }}</span>
-        <input v-model="form.repositoryName" placeholder="my-notes" />
+        <span>{{ $t('app.workspaceName') }}</span>
+        <input v-model="form.workspaceName" placeholder="my-notes" />
       </label>
       <label v-else>
         <span>{{ $t('app.localFolder') }}</span>
         <div class="input-action">
-          <input v-model="form.destination" placeholder="D:\Documents\repository" />
+          <input v-model="form.destination" placeholder="D:\Documents\notes" />
           <button type="button" @click="$emit('chooseCloneDestination')">…</button>
         </div>
       </label>
       <section class="clone-auth">
         <header>
           <div>
-            <strong>{{ $t('app.privateRepository') }}</strong>
+            <strong>{{ $t('app.privateGitRepository') }}</strong>
             <span>{{ $t('app.cloneCredentialHint') }}</span>
           </div>
           <button
@@ -130,21 +135,21 @@ defineEmits<{
     </form>
 
     <form
-      v-else-if="modal === 'mobileRepository'"
+      v-else-if="modal === 'mobileWorkspace'"
       class="dialog compact-dialog"
-      @submit.prevent="$emit('initializeMobileRepository')"
+      @submit.prevent="$emit('createMobileWorkspace')"
     >
       <header>
-        <h2>{{ $t('app.initialize') }}</h2>
+        <h2>{{ $t('app.newFolder') }}</h2>
         <button type="button" @click="$emit('close')">×</button>
       </header>
       <label>
-        <span>{{ $t('app.repositoryName') }}</span>
-        <input v-model="form.repositoryName" autofocus placeholder="my-notes" />
+        <span>{{ $t('app.workspaceName') }}</span>
+        <input v-model="form.workspaceName" autofocus placeholder="my-notes" />
       </label>
       <footer>
         <button type="button" @click="$emit('close')">{{ $t('app.close') }}</button>
-        <button class="primary">{{ $t('app.initialize') }}</button>
+        <button class="primary">{{ $t('app.create') }}</button>
       </footer>
     </form>
 
@@ -184,12 +189,12 @@ defineEmits<{
     <section v-else class="dialog credentials-dialog">
       <header>
         <div>
-          <h2>{{ $t('app.remoteCredentials') }}</h2>
-          <p>{{ $t('app.credentialStorageHint') }}</p>
+          <h2>{{ $t('app.workspaceSettings') }}</h2>
+          <p>{{ $t('app.workspaceSettingsHint') }}</p>
         </div>
         <button type="button" @click="$emit('close')">×</button>
       </header>
-      <section class="github-auth">
+      <section v-if="gitEnabled" class="github-auth">
         <div>
           <strong>GitHub</strong>
           <span>{{ $t('app.authorizeDevice') }}</span>
@@ -204,11 +209,11 @@ defineEmits<{
         </button>
         <span v-else class="auth-unavailable">{{ $t('app.githubUnavailable') }}</span>
       </section>
-      <div v-if="githubDevice" class="device-code">
+      <div v-if="gitEnabled && githubDevice" class="device-code">
         <span>{{ $t('app.githubCode') }}</span>
         <strong>{{ githubDevice.userCode }}</strong>
       </div>
-      <form class="token-form" @submit.prevent="$emit('saveGenericCredential')">
+      <form v-if="gitEnabled" class="token-form" @submit.prevent="$emit('saveGenericCredential')">
         <h3>{{ $t('app.otherHttpsRemote') }}</h3>
         <label>
           <span>{{ $t('app.username') }}</span>
@@ -231,10 +236,10 @@ defineEmits<{
         </footer>
       </form>
       <form
-        class="token-form repository-config-form"
-        @submit.prevent="$emit('saveRepositoryConfig')"
+        class="token-form workspace-config-form"
+        @submit.prevent="$emit('saveWorkspaceConfig')"
       >
-        <h3>{{ $t('app.repositorySettings') }}</h3>
+        <h3>{{ $t('app.workspaceSettings') }}</h3>
         <label>
           <span>{{ $t('app.assetFolder') }}</span>
           <input v-model="form.assetsDir" placeholder="assets" />
@@ -247,11 +252,33 @@ defineEmits<{
           <button class="primary">{{ $t('app.saveSettings') }}</button>
         </footer>
       </form>
-      <footer class="repository-lifecycle">
-        <button class="danger" @click="$emit('forgetActiveRepository')">
-          {{ $t('app.forgetRepository') }}
+      <section v-if="nativeAndroid" class="workspace-trash">
+        <header>
+          <h3>{{ $t('app.trash') }}</h3>
+          <button
+            v-if="trashEntries.length"
+            class="danger"
+            @click="$emit('emptyTrash')"
+          >
+            {{ $t('app.emptyTrash') }}
+          </button>
+        </header>
+        <p v-if="!trashEntries.length">{{ $t('app.trashEmpty') }}</p>
+        <div v-for="entry in trashEntries" :key="entry.id" class="trash-row">
+          <span>
+            <strong>{{ entry.name }}</strong>
+            <small>{{ entry.originalPath }}</small>
+          </span>
+          <button @click="$emit('restoreTrash', entry.id)">
+            {{ $t('app.restore') }}
+          </button>
+        </div>
+      </section>
+      <footer class="workspace-lifecycle">
+        <button class="danger" @click="$emit('forgetActiveWorkspace')">
+          {{ $t('app.forgetWorkspace') }}
         </button>
-        <span>{{ $t('app.forgetRepositoryHint') }}</span>
+        <span>{{ $t('app.forgetWorkspaceHint') }}</span>
       </footer>
     </section>
   </div>

@@ -1,10 +1,14 @@
 // This file is generated from Rust serialization types. Do not edit it by hand.
 // Run `npm run generate:bindings` after changing a native contract.
 
-export interface RepositoryDescriptor {
+export interface WorkspaceDescriptor {
   id: string
   name: string
   root: string
+  git: GitCapability | null
+}
+
+export interface GitCapability {
   commonDir: string
   remoteUrl: string | null
   worktrees: WorktreeDescriptor[]
@@ -59,16 +63,20 @@ export interface GitFileStatus {
   untracked: boolean
 }
 
-export interface DocumentDescriptor {
+export interface WorkspaceEntry {
   path: string
   name: string
-  extension: string
+  entryType: WorkspaceEntryType
+  fileKind: DocumentKind | null
   size: number
   modifiedMs: number
   readOnly: boolean
-  kind: DocumentKind
   gitStatus: GitFileStatus | null
 }
+
+export type WorkspaceEntryType =
+  | 'directory'
+  | 'file'
 
 export type DocumentKind =
   | 'markdown'
@@ -98,20 +106,20 @@ export interface DocumentContent {
   lineEnding: LineEnding
 }
 
-export interface RepositoryConfig {
+export interface WorkspaceConfig {
   assetsDir: string
   ignoreRules: string[]
 }
 
-export interface RepositoryConfigSnapshot {
-  config: RepositoryConfig
+export interface WorkspaceConfigSnapshot {
+  config: WorkspaceConfig
   sha256: string | null
   missing: boolean
 }
 
-export interface SaveRepositoryConfigRequest {
+export interface SaveWorkspaceConfigRequest {
   root: string
-  config: RepositoryConfig
+  config: WorkspaceConfig
   expectedSha256: string | null
   expectedMissing: boolean
 }
@@ -242,16 +250,15 @@ export interface SyncPlan {
   canPush: boolean
 }
 
-export type ManagedChangeKind =
-  | 'document'
-  | 'asset'
-  | 'repositoryConfig'
+export type WorkspaceChangeOperation =
+  | 'upsert'
+  | 'delete'
 
-export interface ManagedChange {
+export interface WorkspaceChange {
   path: string
-  sha256: string
   generation: number
-  kind: ManagedChangeKind
+  operation: WorkspaceChangeOperation
+  version: string | null
 }
 
 export interface PendingGitOperation {
@@ -260,7 +267,7 @@ export interface PendingGitOperation {
   kind: GitOperationKind
   phase: GitOperationPhase
   startedAt: string
-  managedChanges: ManagedChange[]
+  workspaceChanges: WorkspaceChange[]
   changedPaths: string[]
   committed: boolean
   commitId: string | null
@@ -325,25 +332,57 @@ export interface GithubDeviceToken {
 }
 
 export interface LocalStateSnapshot {
-  repositories: string[]
-  managedChanges: Record<string, ManagedChange[]>
+  workspaces: string[]
+  workspaceChanges: Record<string, WorkspaceChange[]>
   pendingGitOperations: Record<string, PendingGitOperation>
   recentFiles: string[]
   credentialRefs: Record<string, string>
 }
 
-export interface RepositoryChangedEvent {
+export interface WorkspaceChangedEvent {
   root: string
 }
 
-export interface RepositoryWatchErrorEvent {
+export interface WorkspaceWatchErrorEvent {
   root: string
   message: string
 }
 
-export interface RepositoryForgottenEvent {
-  repositoryId: string
-  worktreeRoots: string[]
+export interface WorkspaceForgottenEvent {
+  workspaceId: string
+  roots: string[]
+}
+
+export interface GitBaselinePreview {
+  fileCount: number
+  totalBytes: number
+  ignoredCount: number
+  ignoreRules: string[]
+}
+
+export interface MoveWorkspaceEntryRequest {
+  root: string
+  sourcePath: string
+  destinationPath: string
+}
+
+export interface WorkspaceEntryMoveResult {
+  oldPath: string
+  newPath: string
+  movedFiles: WorkspacePathMove[]
+}
+
+export interface WorkspacePathMove {
+  oldPath: string
+  newPath: string
+}
+
+export interface TrashEntry {
+  id: string
+  workspaceRoot: string
+  originalPath: string
+  name: string
+  deletedAt: string
 }
 
 export type ErrorCode =

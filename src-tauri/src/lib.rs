@@ -1,3 +1,5 @@
+#![cfg_attr(target_env = "msvc", allow(linker_messages))]
+
 mod auth;
 mod commands;
 mod content_policy;
@@ -8,6 +10,7 @@ mod git;
 mod paths;
 mod state;
 mod types;
+mod workspace;
 
 include!(concat!(env!("OUT_DIR"), "/ipc_handler.rs"));
 
@@ -32,7 +35,7 @@ pub fn run() {
         .setup(|app| {
             let app_data_dir = app.path().app_data_dir()?;
             app.manage(state::PersistentState::load(&app_data_dir)?);
-            app.manage(state::RepositoryRuntime::default());
+            app.manage(state::WorkspaceRuntime::default());
             Ok(())
         })
         .invoke_handler(marktree_invoke_handler!())

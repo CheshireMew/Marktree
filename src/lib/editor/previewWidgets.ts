@@ -2,11 +2,11 @@ import { EditorView, WidgetType } from '@codemirror/view'
 import katex from 'katex'
 
 import { i18n } from '@/i18n'
-import type { RepositoryImageLoader } from '@/types'
+import type { WorkspaceImageLoader } from '@/types'
 
 export type ResolvedImageSource =
   | { kind: 'external'; key: string; url: string }
-  | { kind: 'repository'; key: string; root: string; path: string }
+  | { kind: 'workspace'; key: string; root: string; path: string }
 
 let mermaidLoader: Promise<typeof import('mermaid')> | undefined
 
@@ -80,7 +80,7 @@ export class ImageWidget extends WidgetType {
   constructor(
     private readonly source: ResolvedImageSource,
     private readonly alt: string,
-    private readonly loadRepositoryImage: RepositoryImageLoader,
+    private readonly loadWorkspaceImage: WorkspaceImageLoader,
   ) {
     super()
   }
@@ -101,15 +101,15 @@ export class ImageWidget extends WidgetType {
     if (this.source.kind === 'external') {
       image.src = this.source.url
     } else {
-      const repositorySource = this.source
-      void this.loadRepositoryImage(repositorySource.root, repositorySource.path)
+      const workspaceSource = this.source
+      void this.loadWorkspaceImage(workspaceSource.root, workspaceSource.path)
         .then((source) => {
           image.src = source
         })
         .catch(() => {
           figure.classList.add('load-error')
           image.alt = i18n.global.t('app.imageLoadFailed', {
-            path: repositorySource.path,
+            path: workspaceSource.path,
           })
         })
     }

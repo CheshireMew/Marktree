@@ -8,9 +8,9 @@ import { i18n } from '@/i18n'
 import { isTauri, nativeApi } from '@/lib/api'
 import { readableError } from '@/lib/errors'
 import type {
-  RepositoryChangedEvent,
-  RepositoryForgottenEvent,
-  RepositoryWatchErrorEvent,
+  WorkspaceChangedEvent,
+  WorkspaceForgottenEvent,
+  WorkspaceWatchErrorEvent,
 } from '@/types'
 
 type Workspace = ReturnType<typeof useWorkspace>
@@ -24,13 +24,13 @@ export function useWorkspaceLifecycle(
   const filesystemRefreshTimers = new Map<string, number>()
   let refreshTimer: number | undefined
   let searchTimer: number | undefined
-  let unlistenRepositoryChanges: UnlistenFn | undefined
-  let unlistenRepositoryWatchError: UnlistenFn | undefined
-  let unlistenRepositoryForgotten: UnlistenFn | undefined
+  let unlistenWorkspaceChanges: UnlistenFn | undefined
+  let unlistenWorkspaceWatchError: UnlistenFn | undefined
+  let unlistenWorkspaceForgotten: UnlistenFn | undefined
   let unlistenCloseRequested: UnlistenFn | undefined
   let closingWindow = false
 
-  function clearRepositoryTimers(roots: Iterable<string>) {
+  function clearWorkspaceTimers(roots: Iterable<string>) {
     for (const root of roots) {
       const timer = filesystemRefreshTimers.get(root)
       if (timer) window.clearTimeout(timer)
@@ -42,11 +42,11 @@ export function useWorkspaceLifecycle(
     if (!workspace.activeRoot.value || !isTauri()) return
     try {
       await workspace.refreshActive(
-        Boolean(workspace.activeRepository.value?.remoteUrl),
+        Boolean(workspace.activeWorkspace.value?.git?.remoteUrl),
         false,
       )
     } catch {
-      // Offline repositories remain editable and retain the last fetched status.
+      // Offline Git workspaces remain editable and retain the last fetched status.
     }
   }
 
@@ -64,34 +64,34 @@ export function useWorkspaceLifecycle(
     if (isTauri()) {
       try {
         nativeAndroid.value = osType() === 'android'
-        unlistenRepositoryChanges = await listen<RepositoryChangedEvent>(
-          'repository-changed',
+        unlistenWorkspaceChanges = await listen<WorkspaceChangedEvent>(
+          'workspace-changed',
           (event) => {
             const { root } = event.payload
-            clearRepositoryTimers([root])
+            clearWorkspaceTimers([root])
             filesystemRefreshTimers.set(
               root,
               window.setTimeout(() => {
                 filesystemRefreshTimers.delete(root)
-                void workspace.handleRepositoryChanged(root)
+                void workspace.handleWorkspaceChanged(root)
               }, 180),
             )
           },
         )
-        unlistenRepositoryForgotten = await listen<RepositoryForgottenEvent>(
-          'repository-forgotten',
+        unlistenWorkspaceForgotten = await listen<WorkspaceForgottenEvent>(
+          'workspace-forgotten',
           (event) => {
-            clearRepositoryTimers(event.payload.worktreeRoots)
-            void workspace.handleRepositoryForgotten(
-              event.payload.repositoryId,
-              event.payload.worktreeRoots,
+            clearWorkspaceTimers(event.payload.roots)
+            void workspace.handleWorkspaceForgotten(
+              event.payload.workspaceId,
+              event.payload.roots,
             )
           },
         )
-        unlistenRepositoryWatchError = await listen<RepositoryWatchErrorEvent>(
-          'repository-watch-error',
+        unlistenWorkspaceWatchError = await listen<WorkspaceWatchErrorEvent>(
+          'workspace-watch-error',
           (event) => {
-            workspace.error.value = i18n.global.t('app.repositoryWatchFailed', {
+            workspace.error.value = i18n.global.t('app.workspaceWatchFailed', {
               root: event.payload.root,
               message: event.payload.message,
             })
@@ -126,10 +126,10 @@ export function useWorkspaceLifecycle(
     document.removeEventListener('visibilitychange', handleVisibilityChange)
     if (refreshTimer) window.clearInterval(refreshTimer)
     if (searchTimer) window.clearTimeout(searchTimer)
-    clearRepositoryTimers(filesystemRefreshTimers.keys())
-    unlistenRepositoryChanges?.()
-    unlistenRepositoryWatchError?.()
-    unlistenRepositoryForgotten?.()
+    clearWorkspaceTimers(filesystemRefreshTimers.keys())
+    unlistenWorkspaceChanges?.()
+    unlistenWorkspaceWatchError?.()
+    unlistenWorkspaceForgotten?.()
     unlistenCloseRequested?.()
   })
 
@@ -137,7 +137,7 @@ export function useWorkspaceLifecycle(
     onActiveRootChanged()
     if (workspace.activeRoot.value && isTauri()) {
       void nativeApi
-        .watchRepository({ root: workspace.activeRoot.value })
+        .watchWorkspace({ root: workspace.activeRoot.value })
         .catch((reason) => {
           workspace.error.value = readableError(reason)
         })
@@ -157,7 +157,7 @@ export function useWorkspaceLifecycle(
   return {
     viewportMobile,
     nativeAndroid,
-    clearRepositoryTimers,
+    clearWorkspaceTimers,
     refreshForPlatform,
   }
 }

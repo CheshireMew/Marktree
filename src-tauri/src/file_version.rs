@@ -8,6 +8,10 @@ pub fn hash_bytes(bytes: &[u8]) -> String {
     hex::encode(Sha256::digest(bytes))
 }
 
+pub fn hash_file(path: &Path) -> AppResult<String> {
+    Ok(hash_bytes(&fs::read(path)?))
+}
+
 pub fn verify_expected_version(
     path: &Path,
     expected_sha256: Option<&str>,

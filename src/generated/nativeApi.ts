@@ -15,58 +15,73 @@ import type {
   DiffMode,
   DiffResult,
   DocumentContent,
-  DocumentDescriptor,
-  GitFileStatus,
+  GitBaselinePreview,
   GitStatusSnapshot,
   GithubDeviceCode,
   GithubDeviceToken,
   LocalStateSnapshot,
+  MoveWorkspaceEntryRequest,
   PendingGitOperation,
-  RepositoryConfigSnapshot,
-  RepositoryDescriptor,
   SaveDocumentRequest,
   SaveDocumentResult,
-  SaveRepositoryConfigRequest,
+  SaveWorkspaceConfigRequest,
   SyncPlan,
   SyncResult,
   TextComparison,
+  TrashEntry,
+  WorkspaceConfigSnapshot,
+  WorkspaceDescriptor,
+  WorkspaceEntry,
+  WorkspaceEntryMoveResult,
   WorktreeDescriptor,
   WorktreeSearchResult,
 } from './native'
 
-export interface OpenRepositoryArgs extends Record<string, unknown> {
+export interface OpenWorkspaceArgs extends Record<string, unknown> {
   path: string
 }
 
-export interface InitializeRepositoryArgs extends Record<string, unknown> {
+export interface CreateWorkspaceArgs extends Record<string, unknown> {
   path: string
 }
 
-export interface CloneRepositoryArgs extends Record<string, unknown> {
+export interface CloneGitWorkspaceArgs extends Record<string, unknown> {
   remoteUrl: string
   path: string
   credentialId: string | null
 }
 
-export interface CloneMobileRepositoryArgs extends Record<string, unknown> {
+export interface CloneMobileGitWorkspaceArgs extends Record<string, unknown> {
   remoteUrl: string
-  repositoryName: string
+  workspaceName: string
   credentialId: string | null
 }
 
-export interface InitializeMobileRepositoryArgs extends Record<string, unknown> {
-  repositoryName: string
+export interface CreateMobileWorkspaceArgs extends Record<string, unknown> {
+  workspaceName: string
 }
 
-export interface ForgetRepositoryArgs extends Record<string, unknown> {
+export interface PreviewWorkspaceGitBaselineArgs extends Record<string, unknown> {
   root: string
 }
 
-export interface RefreshRepositoryArgs extends Record<string, unknown> {
+export interface EnableWorkspaceGitArgs extends Record<string, unknown> {
   root: string
 }
 
-export interface RepositoryStatusArgs extends Record<string, unknown> {
+export interface ForgetWorkspaceArgs extends Record<string, unknown> {
+  root: string
+}
+
+export interface RefreshWorkspaceArgs extends Record<string, unknown> {
+  root: string
+}
+
+export interface WatchWorkspaceArgs extends Record<string, unknown> {
+  root: string
+}
+
+export interface WorkspaceGitStatusArgs extends Record<string, unknown> {
   root: string
 }
 
@@ -95,13 +110,8 @@ export interface CreateWorktreeArgs extends Record<string, unknown> {
   request: CreateWorktreeRequest
 }
 
-export interface WatchRepositoryArgs extends Record<string, unknown> {
+export interface ListWorkspaceEntriesArgs extends Record<string, unknown> {
   root: string
-}
-
-export interface ListDocumentsArgs extends Record<string, unknown> {
-  root: string
-  statuses: GitFileStatus[]
 }
 
 export interface ReadDocumentArgs extends Record<string, unknown> {
@@ -128,12 +138,12 @@ export interface CreateDocumentArgs extends Record<string, unknown> {
   path: string
 }
 
-export interface ReadRepositoryConfigArgs extends Record<string, unknown> {
+export interface ReadWorkspaceConfigArgs extends Record<string, unknown> {
   root: string
 }
 
-export interface SaveRepositoryConfigArgs extends Record<string, unknown> {
-  request: SaveRepositoryConfigRequest
+export interface SaveWorkspaceConfigArgs extends Record<string, unknown> {
+  request: SaveWorkspaceConfigRequest
 }
 
 export interface WriteAssetArgs extends Record<string, unknown> {
@@ -148,6 +158,29 @@ export interface SearchDocumentsArgs extends Record<string, unknown> {
   root: string
   query: string
   limit: number
+}
+
+export interface CreateWorkspaceFolderArgs extends Record<string, unknown> {
+  root: string
+  path: string
+}
+
+export interface MoveWorkspaceEntryArgs extends Record<string, unknown> {
+  request: MoveWorkspaceEntryRequest
+}
+
+export interface TrashWorkspaceEntryArgs extends Record<string, unknown> {
+  root: string
+  path: string
+}
+
+export interface RestoreWorkspaceTrashArgs extends Record<string, unknown> {
+  id: string
+}
+
+export interface OpenWorkspaceFileWithSystemArgs extends Record<string, unknown> {
+  root: string
+  path: string
 }
 
 export interface SearchWorktreesArgs extends Record<string, unknown> {
@@ -202,7 +235,7 @@ export interface SyncPlanArgs extends Record<string, unknown> {
   root: string
 }
 
-export interface SyncMarktreeChangesArgs extends Record<string, unknown> {
+export interface SyncWorkspaceChangesArgs extends Record<string, unknown> {
   root: string
 }
 
@@ -240,7 +273,7 @@ export interface SaveCredentialArgs extends Record<string, unknown> {
   input: CredentialInput
 }
 
-export interface SetRepositoryCredentialArgs extends Record<string, unknown> {
+export interface SetWorkspaceGitCredentialArgs extends Record<string, unknown> {
   root: string
   credentialId: string
 }
@@ -253,30 +286,39 @@ export const isTauri = () => '__TAURI_INTERNALS__' in window
 
 export const nativeApi = {
   getLocalState: () => invoke<LocalStateSnapshot>('get_local_state'),
-  openRepository: (args: OpenRepositoryArgs) => invoke<RepositoryDescriptor>('open_repository', args),
-  initializeRepository: (args: InitializeRepositoryArgs) => invoke<RepositoryDescriptor>('initialize_repository', args),
-  cloneRepository: (args: CloneRepositoryArgs) => invoke<RepositoryDescriptor>('clone_repository', args),
-  cloneMobileRepository: (args: CloneMobileRepositoryArgs) => invoke<RepositoryDescriptor>('clone_mobile_repository', args),
-  initializeMobileRepository: (args: InitializeMobileRepositoryArgs) => invoke<RepositoryDescriptor>('initialize_mobile_repository', args),
-  forgetRepository: (args: ForgetRepositoryArgs) => invoke<void>('forget_repository', args),
-  refreshRepository: (args: RefreshRepositoryArgs) => invoke<RepositoryDescriptor>('refresh_repository', args),
-  repositoryStatus: (args: RepositoryStatusArgs) => invoke<GitStatusSnapshot>('repository_status', args),
+  openWorkspace: (args: OpenWorkspaceArgs) => invoke<WorkspaceDescriptor>('open_workspace', args),
+  createWorkspace: (args: CreateWorkspaceArgs) => invoke<WorkspaceDescriptor>('create_workspace', args),
+  cloneGitWorkspace: (args: CloneGitWorkspaceArgs) => invoke<WorkspaceDescriptor>('clone_git_workspace', args),
+  cloneMobileGitWorkspace: (args: CloneMobileGitWorkspaceArgs) => invoke<WorkspaceDescriptor>('clone_mobile_git_workspace', args),
+  createMobileWorkspace: (args: CreateMobileWorkspaceArgs) => invoke<WorkspaceDescriptor>('create_mobile_workspace', args),
+  previewWorkspaceGitBaseline: (args: PreviewWorkspaceGitBaselineArgs) => invoke<GitBaselinePreview>('preview_workspace_git_baseline', args),
+  enableWorkspaceGit: (args: EnableWorkspaceGitArgs) => invoke<WorkspaceDescriptor>('enable_workspace_git', args),
+  forgetWorkspace: (args: ForgetWorkspaceArgs) => invoke<void>('forget_workspace', args),
+  refreshWorkspace: (args: RefreshWorkspaceArgs) => invoke<WorkspaceDescriptor>('refresh_workspace', args),
+  watchWorkspace: (args: WatchWorkspaceArgs) => invoke<void>('watch_workspace', args),
+  workspaceGitStatus: (args: WorkspaceGitStatusArgs) => invoke<GitStatusSnapshot>('workspace_git_status', args),
   listBranches: (args: ListBranchesArgs) => invoke<BranchDescriptor[]>('list_branches', args),
   createBranch: (args: CreateBranchArgs) => invoke<GitStatusSnapshot>('create_branch', args),
   checkoutBranch: (args: CheckoutBranchArgs) => invoke<GitStatusSnapshot>('checkout_branch', args),
   deleteBranch: (args: DeleteBranchArgs) => invoke<BranchDescriptor[]>('delete_branch', args),
   createWorktree: (args: CreateWorktreeArgs) => invoke<WorktreeDescriptor>('create_worktree', args),
-  watchRepository: (args: WatchRepositoryArgs) => invoke<void>('watch_repository', args),
-  listDocuments: (args: ListDocumentsArgs) => invoke<DocumentDescriptor[]>('list_documents', args),
+  listWorkspaceEntries: (args: ListWorkspaceEntriesArgs) => invoke<WorkspaceEntry[]>('list_workspace_entries', args),
   readDocument: (args: ReadDocumentArgs) => invoke<DocumentContent>('read_document', args),
   openDocument: (args: OpenDocumentArgs) => invoke<DocumentContent>('open_document', args),
   readAsset: (args: ReadAssetArgs) => invoke<AssetPreview>('read_asset', args),
   saveDocument: (args: SaveDocumentArgs) => invoke<SaveDocumentResult>('save_document', args),
   createDocument: (args: CreateDocumentArgs) => invoke<DocumentContent>('create_document', args),
-  readRepositoryConfig: (args: ReadRepositoryConfigArgs) => invoke<RepositoryConfigSnapshot>('read_repository_config', args),
-  saveRepositoryConfig: (args: SaveRepositoryConfigArgs) => invoke<RepositoryConfigSnapshot>('save_repository_config', args),
+  readWorkspaceConfig: (args: ReadWorkspaceConfigArgs) => invoke<WorkspaceConfigSnapshot>('read_workspace_config', args),
+  saveWorkspaceConfig: (args: SaveWorkspaceConfigArgs) => invoke<WorkspaceConfigSnapshot>('save_workspace_config', args),
   writeAsset: (args: WriteAssetArgs) => invoke<AssetWriteResult>('write_asset', args),
   searchDocuments: (args: SearchDocumentsArgs) => invoke<string[]>('search_documents', args),
+  createWorkspaceFolder: (args: CreateWorkspaceFolderArgs) => invoke<string>('create_workspace_folder', args),
+  moveWorkspaceEntry: (args: MoveWorkspaceEntryArgs) => invoke<WorkspaceEntryMoveResult>('move_workspace_entry', args),
+  trashWorkspaceEntry: (args: TrashWorkspaceEntryArgs) => invoke<TrashEntry | null>('trash_workspace_entry', args),
+  listWorkspaceTrash: () => invoke<TrashEntry[]>('list_workspace_trash'),
+  restoreWorkspaceTrash: (args: RestoreWorkspaceTrashArgs) => invoke<TrashEntry>('restore_workspace_trash', args),
+  emptyWorkspaceTrash: () => invoke<void>('empty_workspace_trash'),
+  openWorkspaceFileWithSystem: (args: OpenWorkspaceFileWithSystemArgs) => invoke<void>('open_workspace_file_with_system', args),
   searchWorktrees: (args: SearchWorktreesArgs) => invoke<WorktreeSearchResult[]>('search_worktrees', args),
   stagePaths: (args: StagePathsArgs) => invoke<GitStatusSnapshot>('stage_paths', args),
   stageAll: (args: StageAllArgs) => invoke<GitStatusSnapshot>('stage_all', args),
@@ -288,7 +330,7 @@ export const nativeApi = {
   gitDiff: (args: GitDiffArgs) => invoke<DiffResult>('git_diff', args),
   compareWorktrees: (args: CompareWorktreesArgs) => invoke<TextComparison>('compare_worktrees', args),
   syncPlan: (args: SyncPlanArgs) => invoke<SyncPlan>('sync_plan', args),
-  syncMarktreeChanges: (args: SyncMarktreeChangesArgs) => invoke<SyncResult>('sync_marktree_changes', args),
+  syncWorkspaceChanges: (args: SyncWorkspaceChangesArgs) => invoke<SyncResult>('sync_workspace_changes', args),
   resolveConflict: (args: ResolveConflictArgs) => invoke<void>('resolve_conflict', args),
   resolveConflictWithContent: (args: ResolveConflictWithContentArgs) => invoke<void>('resolve_conflict_with_content', args),
   pendingConflicts: (args: PendingConflictsArgs) => invoke<ConflictRecord[]>('pending_conflicts', args),
@@ -296,7 +338,7 @@ export const nativeApi = {
   resumeGitOperation: (args: ResumeGitOperationArgs) => invoke<SyncResult>('resume_git_operation', args),
   abortGitOperation: (args: AbortGitOperationArgs) => invoke<GitStatusSnapshot>('abort_git_operation', args),
   saveCredential: (args: SaveCredentialArgs) => invoke<void>('save_credential', args),
-  setRepositoryCredential: (args: SetRepositoryCredentialArgs) => invoke<void>('set_repository_credential', args),
+  setWorkspaceGitCredential: (args: SetWorkspaceGitCredentialArgs) => invoke<void>('set_workspace_git_credential', args),
   authConfiguration: () => invoke<AuthConfiguration>('auth_configuration'),
   beginGithubDeviceFlow: () => invoke<GithubDeviceCode>('begin_github_device_flow'),
   pollGithubDeviceFlow: (args: PollGithubDeviceFlowArgs) => invoke<GithubDeviceToken>('poll_github_device_flow', args),

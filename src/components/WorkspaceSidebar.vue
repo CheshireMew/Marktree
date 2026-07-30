@@ -1,106 +1,140 @@
 <script setup lang="ts">
-import {
-  Box,
-  ChevronDown,
-  File,
-  FileCode2,
-  FileImage,
-  FileText,
-  FolderTree,
-  GitBranch,
-  Plus,
-  Search,
-  SquareArrowOutUpRight,
-} from 'lucide-vue-next'
+import { ChevronDown, FilePlus2, FolderPlus, Plus, Search } from 'lucide-vue-next'
+import { computed, ref } from 'vue'
 
-import type {
-  DocumentDescriptor,
-  RepositoryDescriptor,
-  WorktreeDescriptor,
-  WorktreeSearchResult,
-} from '@/types'
+import WorkspaceTreeNode, {
+  type WorkspaceTreeItem,
+} from '@/components/WorkspaceTreeNode.vue'
+import type { WorkspaceDescriptor, WorkspaceEntry } from '@/types'
 
-defineProps<{
-  repository: RepositoryDescriptor
-  activeWorktree?: WorktreeDescriptor
-  documents: DocumentDescriptor[]
+const props = defineProps<{
+  workspace: WorkspaceDescriptor
+  entries: WorkspaceEntry[]
   searchQuery: string
-  searchResults?: WorktreeSearchResult[]
   mobile?: boolean
 }>()
 
-defineEmits<{
+const emit = defineEmits<{
   'update:searchQuery': [value: string]
   search: []
-  selectWorktree: [worktree: WorktreeDescriptor]
   openFile: [path: string]
-  newFile: []
-  newWorktree: []
-  openWindow: [worktree: WorktreeDescriptor]
-  addRepository: []
-  openSearchResult: [result: WorktreeSearchResult]
+  newFile: [directory: string]
+  newFolder: [path: string]
+  moveEntry: [sourcePath: string, destinationPath: string]
+  trashEntry: [path: string]
+  openSystem: [path: string]
+  addWorkspace: []
 }>()
 
-function fileIcon(document: DocumentDescriptor) {
-  if (document.kind === 'markdown') return FileText
-  if (document.kind === 'image') return FileImage
-  if (document.kind === 'text') return FileCode2
-  return File
+const expanded = ref(new Set<string>())
+const context = ref<{ x: number; y: number; entry: WorkspaceEntry }>()
+
+const tree = computed(() => {
+  const items = new Map<string, WorkspaceTreeItem>()
+  for (const entry of props.entries) {
+    items.set(entry.path, { entry, children: [] })
+  }
+  const roots: WorkspaceTreeItem[] = []
+  for (const item of items.values()) {
+    const parentPath = item.entry.path.split('/').slice(0, -1).join('/')
+    const parent = items.get(parentPath)
+    if (parent) parent.children.push(item)
+    else roots.push(item)
+  }
+  const sort = (nodes: WorkspaceTreeItem[]) => {
+    nodes.sort(
+      (left, right) =>
+        Number(left.entry.entryType === 'file') -
+          Number(right.entry.entryType === 'file') ||
+        left.entry.name.localeCompare(right.entry.name),
+    )
+    for (const node of nodes) sort(node.children)
+  }
+  sort(roots)
+  return roots
+})
+
+function toggle(path: string) {
+  const next = new Set(expanded.value)
+  if (next.has(path)) next.delete(path)
+  else next.add(path)
+  expanded.value = next
+}
+
+function showContext(event: MouseEvent, entry: WorkspaceEntry) {
+  context.value = { x: event.clientX, y: event.clientY, entry }
+}
+
+function directoryFor(entry: WorkspaceEntry) {
+  return entry.entryType === 'directory'
+    ? entry.path
+    : entry.path.split('/').slice(0, -1).join('/')
+}
+
+function newFile(entry?: WorkspaceEntry) {
+  context.value = undefined
+  emit('newFile', entry ? directoryFor(entry) : '')
+}
+
+function newFolder(entry?: WorkspaceEntry) {
+  const directory = entry ? directoryFor(entry) : ''
+  const name = window.prompt('新文件夹名称')
+  context.value = undefined
+  if (!name?.trim()) return
+  emit('newFolder', directory ? `${directory}/${name.trim()}` : name.trim())
+}
+
+function renameEntry(entry: WorkspaceEntry) {
+  const name = window.prompt('新名称', entry.name)
+  context.value = undefined
+  if (!name?.trim() || name.trim() === entry.name) return
+  const parent = entry.path.split('/').slice(0, -1).join('/')
+  emit('moveEntry', entry.path, parent ? `${parent}/${name.trim()}` : name.trim())
+}
+
+function deleteEntry(entry: WorkspaceEntry) {
+  context.value = undefined
+  if (window.confirm(`确定把“${entry.name}”移入回收站吗？`)) {
+    emit('trashEntry', entry.path)
+  }
+}
+
+function dropAtRoot(event: DragEvent) {
+  const sourcePath = event.dataTransfer?.getData('application/x-marktree-path')
+  if (!sourcePath || !sourcePath.includes('/')) return
+  emit('moveEntry', sourcePath, sourcePath.split('/').at(-1) ?? sourcePath)
 }
 </script>
 
 <template>
-  <aside class="workspace-sidebar">
+  <aside
+    class="workspace-sidebar"
+    @click="context = undefined"
+    @dragover.prevent
+    @drop.prevent="dropAtRoot"
+  >
     <header class="sidebar-header">
       <div>
-        <strong>{{ repository.name }}</strong>
-        <span>{{ activeWorktree?.branch ?? $t('app.detachedHead') }}</span>
+        <strong>{{ workspace.name }}</strong>
+        <span>{{ workspace.git ? $t('app.gitWorkspace') : $t('app.localWorkspace') }}</span>
       </div>
-      <button v-if="mobile" class="sidebar-add-repository" @click="$emit('addRepository')">
+      <button v-if="mobile" class="sidebar-add-workspace" @click="$emit('addWorkspace')">
         <Plus :size="18" />
       </button>
-      <GitBranch v-else :size="18" />
+      <ChevronDown v-else :size="18" />
     </header>
-
-    <section v-if="!mobile" class="sidebar-section worktree-section">
-      <div class="section-title">
-        <span><Box :size="15" /> {{ $t('app.worktrees') }}</span>
-        <button :title="$t('app.worktreeNew')" @click="$emit('newWorktree')">
-          <Plus :size="16" />
-        </button>
-      </div>
-      <button
-        v-for="worktree in repository.worktrees"
-        :key="worktree.path"
-        class="worktree-row"
-        :class="{ active: worktree.path === activeWorktree?.path }"
-        @click="$emit('selectWorktree', worktree)"
-      >
-        <span class="worktree-main">
-          <FolderTree :size="16" />
-          <span>
-            <b>{{ worktree.isMain ? repository.name : worktree.name }}</b>
-            <small>{{ worktree.branch ?? $t('app.detachedHead') }}</small>
-          </span>
-        </span>
-        <span class="worktree-actions">
-          <i v-if="worktree.status.changedCount">{{ worktree.status.changedCount }}</i>
-          <button
-            :title="$t('app.separateWindow')"
-            @click.stop="$emit('openWindow', worktree)"
-          >
-            <SquareArrowOutUpRight :size="14" />
-          </button>
-        </span>
-      </button>
-    </section>
 
     <section class="sidebar-section file-section">
       <div class="section-title">
         <span><ChevronDown :size="15" /> {{ $t('app.files') }}</span>
-        <button :title="$t('app.newDocument')" @click="$emit('newFile')">
-          <Plus :size="16" />
-        </button>
+        <span class="tree-create-actions">
+          <button :title="$t('app.newDocument')" @click.stop="newFile()">
+            <FilePlus2 :size="16" />
+          </button>
+          <button :title="$t('app.newFolder')" @click.stop="newFolder()">
+            <FolderPlus :size="16" />
+          </button>
+        </span>
       </div>
       <label class="search-box">
         <Search :size="15" />
@@ -112,51 +146,37 @@ function fileIcon(document: DocumentDescriptor) {
         />
       </label>
       <div class="file-list">
-        <button
-          v-for="document in documents"
-          :key="document.path"
-          class="file-row"
-          :class="{ muted: document.readOnly }"
-          :title="document.path"
-          @click="$emit('openFile', document.path)"
-        >
-          <component :is="fileIcon(document)" :size="16" />
-          <span>
-            <b>{{ document.name }}</b>
-            <small v-if="document.path.includes('/')">{{
-              document.path.slice(0, document.path.lastIndexOf('/'))
-            }}</small>
-          </span>
-          <i
-            v-if="document.gitStatus"
-            class="file-state"
-            :class="document.gitStatus.worktreeStatus"
-          >
-            {{
-              document.gitStatus.untracked
-                ? 'U'
-                : document.gitStatus.worktreeStatus === 'modified'
-                  ? 'M'
-                  : '•'
-            }}
-          </i>
-        </button>
-        <div
-          v-if="searchQuery && searchResults?.some((result) => result.root !== activeWorktree?.path)"
-          class="cross-search-title"
-        >
-          {{ $t('app.otherWorktrees') }}
-        </div>
-        <button
-          v-for="result in searchResults?.filter((item) => item.root !== activeWorktree?.path)"
-          :key="`${result.root}-${result.path}`"
-          class="file-row cross-search-row"
-          @click="$emit('openSearchResult', result)"
-        >
-          <Search :size="15" />
-          <span><b>{{ result.path }}</b><small>{{ result.worktree }}</small></span>
-        </button>
+        <WorkspaceTreeNode
+          v-for="item in tree"
+          :key="item.entry.path"
+          :item="item"
+          :depth="0"
+          :expanded="expanded"
+          @toggle="toggle"
+          @open="$emit('openFile', $event)"
+          @context="showContext"
+          @move="(source, destination) => $emit('moveEntry', source, destination)"
+        />
       </div>
     </section>
+    <div
+      v-if="context"
+      class="entry-context-menu"
+      :style="{ left: `${context.x}px`, top: `${context.y}px` }"
+      @click.stop
+    >
+      <button @click="newFile(context.entry)">{{ $t('app.newDocument') }}</button>
+      <button @click="newFolder(context.entry)">{{ $t('app.newFolder') }}</button>
+      <button @click="renameEntry(context.entry)">{{ $t('app.rename') }}</button>
+      <button
+        v-if="context.entry.entryType === 'file'"
+        @click="$emit('openSystem', context.entry.path); context = undefined"
+      >
+        {{ $t('app.openWithSystem') }}
+      </button>
+      <button class="danger" @click="deleteEntry(context.entry)">
+        {{ $t('app.moveToTrash') }}
+      </button>
+    </div>
   </aside>
 </template>

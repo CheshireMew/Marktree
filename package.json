@@ -2,7 +2,7 @@
   "name": "marktree",
   "private": true,
   "version": "0.1.0",
-  "description": "A source-faithful Markdown workspace for Git repositories and worktrees.",
+  "description": "A source-faithful local Markdown and text workspace with optional Git.",
   "type": "module",
   "scripts": {
     "dev": "vite",

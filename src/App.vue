@@ -1,11 +1,11 @@
 <script setup lang="ts">
 import {
   Cloud,
-  FolderGit2,
-  GitCompareArrows,
+  FolderOpen,
+  FolderPlus,
+  GitBranch,
   Menu,
   MoreHorizontal,
-  Plus,
   RefreshCw,
   X,
 } from 'lucide-vue-next'
@@ -22,15 +22,17 @@ import { useI18n } from 'vue-i18n'
 import ConflictDialog from '@/components/ConflictDialog.vue'
 import DiffPanel from '@/components/DiffPanel.vue'
 import GitPanel from '@/components/GitPanel.vue'
-import RepositoryRail from '@/components/RepositoryRail.vue'
-import RepositoryDialogs from '@/components/RepositoryDialogs.vue'
+import WorkspaceRail from '@/components/WorkspaceRail.vue'
+import WorkspaceDialogs from '@/components/WorkspaceDialogs.vue'
+import WindowTitlebar from '@/components/WindowTitlebar.vue'
 import WorkspaceSidebar from '@/components/WorkspaceSidebar.vue'
 import WorkspaceOverlays from '@/components/WorkspaceOverlays.vue'
 import { useDialogState } from '@/composables/app/dialogState'
-import { useRepositoryProvisioning } from '@/composables/app/useRepositoryProvisioning'
-import { useRepositorySettings } from '@/composables/app/useRepositorySettings'
+import { useWorkspaceProvisioning } from '@/composables/app/useWorkspaceProvisioning'
+import { useWorkspaceSettings } from '@/composables/app/useWorkspaceSettings'
 import { useWorkspaceLifecycle } from '@/composables/app/useWorkspaceLifecycle'
 import { useWorkspace } from '@/composables/useWorkspace'
+import { readableError } from '@/lib/errors'
 
 const EditorWorkspace = defineAsyncComponent(
   () => import('@/components/EditorWorkspace.vue'),
@@ -51,17 +53,17 @@ let closeActiveModal = () => {
 }
 const lifecycle = useWorkspaceLifecycle(workspace, () => {
   sidebarOpen.value = false
-  if (modal.value && !['clone', 'mobileRepository'].includes(modal.value)) {
+  if (modal.value && !['clone', 'mobileWorkspace'].includes(modal.value)) {
     closeActiveModal()
   }
 })
-const { viewportMobile, nativeAndroid, clearRepositoryTimers } = lifecycle
+const { viewportMobile, nativeAndroid, clearWorkspaceTimers } = lifecycle
 
-const settings = useRepositorySettings(
+const settings = useWorkspaceSettings(
   workspace,
   modal,
   form,
-  clearRepositoryTimers,
+  clearWorkspaceTimers,
 )
 closeActiveModal = settings.closeModal
 const {
@@ -69,15 +71,15 @@ const {
   githubDevice,
   githubPending,
   cloneCredentialId,
-  openCredentials,
+  openSettings,
   saveGenericCredential,
-  saveRepositoryConfig,
-  forgetActiveRepository,
+  saveWorkspaceConfig,
+  forgetActiveWorkspace,
   beginGithubLogin,
   closeModal,
 } = settings
 
-const provisioning = useRepositoryProvisioning(
+const provisioning = useWorkspaceProvisioning(
   workspace,
   modal,
   form,
@@ -88,11 +90,11 @@ const provisioning = useRepositoryProvisioning(
   closeModal,
 )
 const {
-  chooseRepository,
+  chooseWorkspace,
   chooseCloneDestination,
   openCloneDialog,
-  cloneRepository,
-  initializeMobileRepository,
+  cloneGitWorkspace,
+  createMobileWorkspace,
   openNewDocument,
   createDocument,
   openWorktreeDialog,
@@ -101,6 +103,14 @@ const {
 } = provisioning
 
 const mobile = computed(() => viewportMobile.value || nativeAndroid.value)
+const titlebarContext = computed(() => {
+  const activeWorkspace = workspace.activeWorkspace.value
+  const worktree = workspace.activeWorktree.value
+  if (!activeWorkspace) return undefined
+  return worktree
+    ? `${activeWorkspace.name} · ${worktree.name}`
+    : activeWorkspace.name
+})
 const shellClass = computed(() => ({
   dark: dark.value,
   mobile: mobile.value,
@@ -153,13 +163,19 @@ function abortPendingOperation() {
 </script>
 
 <template>
-  <div class="app-shell" :class="shellClass">
-    <RepositoryRail
+  <div class="app-frame" :class="{ mobile }">
+    <WindowTitlebar
       v-if="!mobile"
-      :repositories="workspace.repositories.value"
-      :active-id="workspace.activeRepositoryId.value"
+      :context="titlebarContext"
+      @error="workspace.error.value = readableError($event)"
+    />
+    <div class="app-shell" :class="shellClass">
+    <WorkspaceRail
+      v-if="!mobile"
+      :workspaces="workspace.workspaces.value"
+      :active-id="workspace.activeWorkspaceId.value"
       :dark="dark"
-      @select="workspace.activateRepository"
+      @select="workspace.activateWorkspace"
       @add="addMenuOpen = !addMenuOpen"
       @toggle-theme="dark = !dark"
     />
@@ -168,111 +184,94 @@ function abortPendingOperation() {
       <button @click="sidebarOpen = !sidebarOpen"><Menu :size="21" /></button>
       <div>
         <select
-          v-if="workspace.repositories.value.length"
-          :value="workspace.activeRepositoryId.value"
-          :aria-label="$t('app.repository')"
-          @change="workspace.activateRepository(($event.target as HTMLSelectElement).value)"
+          v-if="workspace.workspaces.value.length"
+          :value="workspace.activeWorkspaceId.value"
+          :aria-label="$t('app.workspace')"
+          @change="workspace.activateWorkspace(($event.target as HTMLSelectElement).value)"
         >
           <option
-            v-for="repository in workspace.repositories.value"
-            :key="repository.id"
-            :value="repository.id"
+            v-for="item in workspace.workspaces.value"
+            :key="item.id"
+            :value="item.id"
           >
-            {{ repository.name }}
+            {{ item.name }}
           </option>
         </select>
         <strong v-else>Marktree</strong>
         <span class="mobile-subtitle">
-          {{ workspace.activeWorktree.value?.branch ?? $t('app.subtitle') }}
-          ·
-          <button
-            v-if="workspace.pendingOperation.value"
-            :disabled="workspace.syncing.value"
-            @click="abortPendingOperation"
-          >
-            {{ $t('app.abortGitOperation') }}
-          </button>
-          <template v-if="workspace.pendingOperation.value"> · </template>
-          <button :disabled="workspace.syncing.value" @click="workspace.sync">
-            {{ workspace.syncing.value ? $t('app.syncing') : $t('app.sync') }}
-          </button>
+          <template v-if="workspace.activeWorkspace.value?.git">
+            {{ workspace.activeWorktree.value?.branch ?? $t('app.detachedHead') }}
+            ·
+            <button
+              v-if="workspace.pendingOperation.value"
+              :disabled="workspace.syncing.value"
+              @click="abortPendingOperation"
+            >
+              {{ $t('app.abortGitOperation') }}
+            </button>
+            <template v-if="workspace.pendingOperation.value"> · </template>
+            <button :disabled="workspace.syncing.value" @click="workspace.sync">
+              {{ workspace.syncing.value ? $t('app.syncing') : $t('app.sync') }}
+            </button>
+          </template>
+          <template v-else>{{ $t('app.localWorkspace') }}</template>
         </span>
       </div>
     </header>
 
     <div v-if="addMenuOpen" class="add-menu">
-      <button @click="chooseRepository('open')"><FolderGit2 :size="16" /> {{ $t('app.open') }}</button>
+      <button @click="chooseWorkspace('open')"><FolderOpen :size="16" /> {{ $t('app.openFolder') }}</button>
+      <button @click="chooseWorkspace('create')"><FolderPlus :size="16" /> {{ $t('app.newFolder') }}</button>
       <button @click="openCloneDialog"><Cloud :size="16" /> {{ $t('app.clone') }}</button>
-      <button @click="chooseRepository('initialize')"><Plus :size="16" /> {{ $t('app.initialize') }}</button>
     </div>
 
-    <template v-if="workspace.activeRepository.value">
+    <template v-if="workspace.activeWorkspace.value">
       <WorkspaceSidebar
-        :repository="workspace.activeRepository.value"
-        :active-worktree="workspace.activeWorktree.value"
-        :documents="workspace.filteredDocuments.value"
+        :workspace="workspace.activeWorkspace.value"
+        :entries="workspace.filteredEntries.value"
         :search-query="workspace.searchQuery.value"
-        :search-results="workspace.crossWorktreeMatches.value"
         :mobile="mobile"
         @update:search-query="workspace.searchQuery.value = $event"
         @search="workspace.search"
-        @select-worktree="workspace.selectWorktree"
         @open-file="workspace.openDocument"
         @new-file="openNewDocument"
-        @new-worktree="openWorktreeDialog"
-        @open-window="openWorktreeWindow"
-        @add-repository="openCloneDialog"
-        @open-search-result="workspace.openSearchResult"
+        @new-folder="workspace.createFolder"
+        @move-entry="workspace.moveWorkspaceEntry"
+        @trash-entry="workspace.trashWorkspaceEntry"
+        @open-system="workspace.openWithSystem"
+        @add-workspace="addMenuOpen = !addMenuOpen"
       />
 
       <section class="main-column">
         <header v-if="!mobile" class="workspace-topbar">
           <div class="branch-status">
-            <strong>{{ workspace.activeWorktree.value?.name }}</strong>
-            <span>{{ workspace.activeStatus.value?.branch ?? $t('app.detachedHead') }}</span>
-            <i v-if="workspace.activeStatus.value?.ahead">
-              ↑ {{ workspace.activeStatus.value.ahead }}
-            </i>
-            <i v-if="workspace.activeStatus.value?.behind">
-              ↓ {{ workspace.activeStatus.value.behind }}
-            </i>
+            <strong>{{ workspace.activeWorkspace.value.name }}</strong>
+            <template v-if="workspace.activeWorkspace.value.git">
+              <span>{{ workspace.activeStatus.value?.branch ?? $t('app.detachedHead') }}</span>
+              <i v-if="workspace.activeStatus.value?.ahead">
+                ↑ {{ workspace.activeStatus.value.ahead }}
+              </i>
+              <i v-if="workspace.activeStatus.value?.behind">
+                ↓ {{ workspace.activeStatus.value.behind }}
+              </i>
+            </template>
+            <span v-else>{{ $t('app.localWorkspace') }}</span>
           </div>
           <div class="topbar-actions">
-            <select
-              v-if="
-                workspace.activeTab.value &&
-                workspace.activeRepository.value.worktrees.length > 1
-              "
-              class="worktree-compare-select"
-              value=""
-              @change="
-                workspace.showWorktreeDiff(($event.target as HTMLSelectElement).value);
-                ($event.target as HTMLSelectElement).value = ''
-              "
-            >
-              <option value="" disabled>{{ $t('app.compareWorktrees') }}</option>
-              <option
-                v-for="worktree in workspace.activeRepository.value.worktrees.filter(
-                  (item) => item.path !== workspace.activeRoot.value,
-                )"
-                :key="worktree.path"
-                :value="worktree.path"
-              >
-                {{ worktree.name }}
-              </option>
-            </select>
             <button @click="workspace.refreshActive(false)">
               <RefreshCw :size="16" /> {{ $t('app.refresh') }}
             </button>
             <button
+              v-if="workspace.activeWorkspace.value.git"
+              class="advanced-git-button"
               :disabled="Boolean(workspace.pendingOperation.value)"
               @click="gitPanelOpen = !gitPanelOpen"
             >
-              <GitCompareArrows :size="16" />
+              <GitBranch :size="16" />
               {{
                 workspace.activeStatus.value?.changedCount
                   ? $t('app.changed', { count: workspace.activeStatus.value.changedCount })
-                  : $t('app.clean')
+                  : $t('app.advancedGit')
               }}
             </button>
             <button
@@ -283,14 +282,22 @@ function abortPendingOperation() {
               <X :size="16" /> {{ $t('app.abortGitOperation') }}
             </button>
             <button
-              class="primary"
+              v-if="workspace.activeWorkspace.value.git"
+              class="primary sync-button"
               :disabled="workspace.syncing.value"
               @click="workspace.sync"
             >
               <RefreshCw :size="16" :class="{ spinning: workspace.syncing.value }" />
               {{ workspace.syncing.value ? $t('app.syncing') : $t('app.sync') }}
             </button>
-            <button class="icon-only" @click="openCredentials"><MoreHorizontal :size="18" /></button>
+            <button
+              v-else
+              class="enable-git-button"
+              @click="workspace.enableWorkspaceGit"
+            >
+              <GitBranch :size="16" /> {{ $t('app.enableGit') }}
+            </button>
+            <button class="icon-only" @click="openSettings"><MoreHorizontal :size="18" /></button>
           </div>
         </header>
 
@@ -299,7 +306,8 @@ function abortPendingOperation() {
           :active-tab="workspace.activeTab.value"
           :active-key="workspace.activeTabKey.value"
           :dark="dark"
-          :load-repository-image="workspace.loadRepositoryImage"
+          :load-workspace-image="workspace.loadWorkspaceImage"
+          :can-compare="Boolean(workspace.activeWorkspace.value.git)"
           @activate="workspace.activeTabKey.value = $event"
           @close="workspace.closeTab"
           @update-content="workspace.updateActiveContent"
@@ -307,7 +315,9 @@ function abortPendingOperation() {
           @diff="
             workspace.activeTab.value?.dirty
               ? workspace.showUnsavedDiff()
-              : workspace.showDiff('worktreeToHead')
+              : workspace.activeWorkspace.value.git
+                ? workspace.showDiff('worktreeToHead')
+                : undefined
           "
         />
 
@@ -316,9 +326,10 @@ function abortPendingOperation() {
           <span>
             {{ workspace.activeTab.value?.encoding ?? 'utf8' }}
             · {{ workspace.activeTab.value?.lineEnding ?? 'none' }}
-            ·
-            {{ workspace.activeStatus.value?.upstream ?? $t('app.remote') }}
-            · {{ workspace.activeStatus.value?.branch ?? 'HEAD' }}
+            <template v-if="workspace.activeWorkspace.value.git">
+              · {{ workspace.activeStatus.value?.upstream ?? $t('app.remote') }}
+              · {{ workspace.activeStatus.value?.branch ?? 'HEAD' }}
+            </template>
           </span>
         </footer>
       </section>
@@ -332,12 +343,18 @@ function abortPendingOperation() {
         "
         :status="workspace.activeStatus.value"
         :branches="workspace.branches.value"
+        :worktrees="workspace.activeWorkspace.value.git?.worktrees ?? []"
+        :active-root="workspace.activeRoot.value"
         @close="gitPanelOpen = false"
         @action="workspace.gitAction"
         @set-staged="workspace.setPathStaged"
         @create-branch="workspace.createBranch"
         @checkout-branch="workspace.checkoutBranch"
         @delete-branch="workspace.deleteBranch"
+        @select-worktree="workspace.selectWorktree"
+        @new-worktree="openWorktreeDialog"
+        @open-window="openWorktreeWindow"
+        @settings="openSettings"
       />
       <DiffPanel
         v-if="workspace.diffOpen.value && workspace.diffResult.value"
@@ -354,14 +371,14 @@ function abortPendingOperation() {
         <h1>{{ $t('app.welcomeTitle') }}</h1>
         <p>{{ $t('app.welcomeBody') }}</p>
         <div class="welcome-actions">
-          <button v-if="!nativeAndroid" class="primary" @click="chooseRepository('open')">
-            <FolderGit2 :size="18" /> {{ $t('app.open') }}
+          <button v-if="!nativeAndroid" class="primary" @click="chooseWorkspace('open')">
+            <FolderOpen :size="18" /> {{ $t('app.openFolder') }}
           </button>
-          <button :class="{ primary: nativeAndroid }" @click="openCloneDialog">
-            <Cloud :size="18" /> {{ $t('app.clone') }}
+          <button :class="{ primary: nativeAndroid }" @click="chooseWorkspace('create')">
+            <FolderPlus :size="18" /> {{ $t('app.newFolder') }}
           </button>
-          <button @click="chooseRepository('initialize')">
-            <Plus :size="18" /> {{ $t('app.initialize') }}
+          <button @click="openCloneDialog">
+            <Cloud :size="18" /> {{ $t('app.cloneGitRepository') }}
           </button>
         </div>
       </div>
@@ -376,24 +393,28 @@ function abortPendingOperation() {
       <button @click="workspace.clearNotice"><X :size="15" /></button>
     </div>
 
-    <RepositoryDialogs
+    <WorkspaceDialogs
       :modal="modal"
       :form="form"
       :native-android="nativeAndroid"
+      :git-enabled="Boolean(workspace.activeWorkspace.value?.git)"
       :auth-configuration="authConfiguration"
       :github-device="githubDevice"
       :github-pending="githubPending"
       :clone-credential-id="cloneCredentialId"
+      :trash-entries="workspace.trashEntries.value"
       @close="closeModal"
       @choose-clone-destination="chooseCloneDestination"
-      @clone="cloneRepository"
+      @clone="cloneGitWorkspace"
       @begin-github-login="beginGithubLogin"
       @create-document="createDocument"
-      @initialize-mobile-repository="initializeMobileRepository"
+      @create-mobile-workspace="createMobileWorkspace"
       @create-worktree="createWorktree"
       @save-generic-credential="saveGenericCredential"
-      @save-repository-config="saveRepositoryConfig"
-      @forget-active-repository="forgetActiveRepository"
+      @save-workspace-config="saveWorkspaceConfig"
+      @forget-active-workspace="forgetActiveWorkspace"
+      @restore-trash="workspace.restoreWorkspaceTrash"
+      @empty-trash="workspace.emptyWorkspaceTrash"
     />
 
     <WorkspaceOverlays
@@ -409,14 +430,15 @@ function abortPendingOperation() {
       @close-image-preview="workspace.imagePreview.value = undefined"
     />
 
-    <ConflictDialog
-      v-if="workspace.conflicts.value.length"
-      :conflicts="workspace.conflicts.value"
-      :native-android="nativeAndroid"
-      :syncing="workspace.syncing.value"
-      @abort="abortPendingOperation"
-      @resolve-choice="workspace.resolveConflict"
-      @resolve-content="workspace.resolveConflictContent"
-    />
+      <ConflictDialog
+        v-if="workspace.conflicts.value.length"
+        :conflicts="workspace.conflicts.value"
+        :native-android="nativeAndroid"
+        :syncing="workspace.syncing.value"
+        @abort="abortPendingOperation"
+        @resolve-choice="workspace.resolveConflict"
+        @resolve-content="workspace.resolveConflictContent"
+      />
+    </div>
   </div>
 </template>

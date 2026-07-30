@@ -54,6 +54,14 @@ pub fn normalize_relative_paths(paths: &[String]) -> AppResult<Vec<String>> {
 }
 
 pub fn resolve_existing_file(root: &Path, relative: &str) -> AppResult<PathBuf> {
+    let path = resolve_existing_entry(root, relative)?;
+    if !path.is_file() {
+        return Err(AppError::InvalidPath(path.display().to_string()));
+    }
+    Ok(path)
+}
+
+pub fn resolve_existing_entry(root: &Path, relative: &str) -> AppResult<PathBuf> {
     let relative = normalize_relative(relative)?;
     let path = fs::canonicalize(root.join(relative.replace('/', std::path::MAIN_SEPARATOR_STR)))
         .map_err(|error| {
@@ -65,7 +73,7 @@ pub fn resolve_existing_file(root: &Path, relative: &str) -> AppResult<PathBuf> 
                 AppError::Io(error)
             }
         })?;
-    if !path.starts_with(root) || !path.is_file() {
+    if !path.starts_with(root) {
         return Err(AppError::InvalidPath(path.display().to_string()));
     }
     Ok(path)

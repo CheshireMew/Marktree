@@ -2,7 +2,7 @@ mod persistent;
 mod runtime;
 
 pub use persistent::PersistentState;
-pub use runtime::RepositoryRuntime;
+pub use runtime::WorkspaceRuntime;
 
 #[cfg(test)]
 mod tests {
@@ -13,7 +13,7 @@ mod tests {
 
     use super::*;
     use crate::types::{
-        GitOperationKind, GitOperationPhase, ManagedChangeKind, PendingGitOperation,
+        GitOperationKind, GitOperationPhase, PendingGitOperation, WorkspaceChangeOperation,
     };
 
     #[test]
@@ -21,25 +21,25 @@ mod tests {
         let directory = TempDir::new().unwrap();
         let state = PersistentState::load(directory.path()).unwrap();
         let first = state
-            .record_change(
+            .record_workspace_change(
                 "C:\\repo",
                 "notes/shared.md",
-                "first",
-                ManagedChangeKind::Document,
+                WorkspaceChangeOperation::Upsert,
+                Some("first"),
             )
             .unwrap();
         let second = state
-            .record_change(
+            .record_workspace_change(
                 "C:\\repo",
                 "notes/shared.md",
-                "second",
-                ManagedChangeKind::Document,
+                WorkspaceChangeOperation::Upsert,
+                Some("second"),
             )
             .unwrap();
 
-        state.clear_managed_changes("C:\\repo", &[first]).unwrap();
+        state.clear_workspace_changes("C:\\repo", &[first]).unwrap();
 
-        assert_eq!(state.managed_changes("C:\\repo"), vec![second]);
+        assert_eq!(state.workspace_changes("C:\\repo"), vec![second]);
     }
 
     #[test]
@@ -47,14 +47,14 @@ mod tests {
         let directory = TempDir::new().unwrap();
         {
             let state = PersistentState::load(directory.path()).unwrap();
-            state.register_repository("C:\\first").unwrap();
-            state.register_repository("C:\\second").unwrap();
+            state.register_workspace("C:\\first").unwrap();
+            state.register_workspace("C:\\second").unwrap();
         }
         fs::write(directory.path().join("state.json"), b"not json").unwrap();
 
         let recovered = PersistentState::load(directory.path()).unwrap();
 
-        assert_eq!(recovered.snapshot().repositories, vec!["C:\\first"]);
+        assert_eq!(recovered.snapshot().workspaces, vec!["C:\\first"]);
     }
 
     #[test]
@@ -81,7 +81,7 @@ mod tests {
             kind: GitOperationKind::Sync,
             phase: GitOperationPhase::Push,
             started_at: Utc::now().to_rfc3339(),
-            managed_changes: Vec::new(),
+            workspace_changes: Vec::new(),
             changed_paths: Vec::new(),
             committed: true,
             commit_id: Some("abc".to_owned()),
@@ -104,10 +104,10 @@ mod tests {
     }
 
     #[test]
-    fn schema_two_state_is_migrated_without_losing_repository_data() {
+    fn schema_five_state_is_migrated_and_immediately_rewritten() {
         let directory = TempDir::new().unwrap();
         let previous = serde_json::json!({
-            "schemaVersion": 2,
+            "schemaVersion": 5,
             "nextGeneration": 4,
             "repositories": ["C:\\repo"],
             "managedChanges": {},
@@ -137,7 +137,7 @@ mod tests {
 
         let migrated = PersistentState::load(directory.path()).unwrap().snapshot();
 
-        assert_eq!(migrated.repositories, vec!["C:\\repo"]);
+        assert_eq!(migrated.workspaces, vec!["C:\\repo"]);
         assert_eq!(migrated.recent_files, vec!["C:\\repo\nnotes/day.md"]);
         assert_eq!(
             migrated.credential_refs.get("C:\\repo\\.git"),
@@ -149,34 +149,50 @@ mod tests {
         assert_eq!(operation.original_head_oid, None);
         assert!(!operation.aborting);
         assert!(!operation.stash_apply_started);
+        let rewritten: serde_json::Value =
+            serde_json::from_slice(&fs::read(directory.path().join("state.json")).unwrap())
+                .unwrap();
+        assert_eq!(rewritten["schemaVersion"], 6);
+        assert!(rewritten.get("repositories").is_none());
+        assert!(rewritten.get("managedChanges").is_none());
     }
 
     #[test]
     fn newer_search_generation_cancels_the_previous_scan() {
-        let runtime = RepositoryRuntime::default();
+        let runtime = WorkspaceRuntime::default();
 
-        let first = runtime.begin_search("repository");
-        let second = runtime.begin_search("repository");
+        let first = runtime.begin_search("workspace");
+        let second = runtime.begin_search("workspace");
 
-        assert!(!runtime.is_search_current("repository", first));
-        assert!(runtime.is_search_current("repository", second));
+        assert!(!runtime.is_search_current("workspace", first));
+        assert!(runtime.is_search_current("workspace", second));
     }
 
     #[test]
-    fn forgetting_a_repository_removes_persistent_and_runtime_records() {
+    fn forgetting_a_workspace_removes_persistent_and_runtime_records() {
         let directory = TempDir::new().unwrap();
         let state = PersistentState::load(directory.path()).unwrap();
-        let runtime = RepositoryRuntime::default();
+        let runtime = WorkspaceRuntime::default();
         let main = "C:\\repo";
         let worktree = "C:\\repo-draft";
         let roots = [main.to_owned(), worktree.to_owned()];
         let credential_key = "C:\\repo\\.git";
-        state.register_repository(main).unwrap();
+        state.register_workspace(main).unwrap();
         state
-            .record_change(main, "main.md", "main", ManagedChangeKind::Document)
+            .record_workspace_change(
+                main,
+                "main.md",
+                WorkspaceChangeOperation::Upsert,
+                Some("main"),
+            )
             .unwrap();
         state
-            .record_change(worktree, "draft.md", "draft", ManagedChangeKind::Document)
+            .record_workspace_change(
+                worktree,
+                "draft.md",
+                WorkspaceChangeOperation::Upsert,
+                Some("draft"),
+            )
             .unwrap();
         state.remember_file(main, "main.md").unwrap();
         state.remember_file(worktree, "draft.md").unwrap();
@@ -187,13 +203,13 @@ mod tests {
         assert_eq!(runtime.begin_search(worktree), 1);
 
         state
-            .forget_repository(main, &roots, credential_key)
+            .forget_workspace(main, &roots, credential_key)
             .unwrap();
-        runtime.forget_worktrees(&roots);
+        runtime.forget_roots(&roots);
         let snapshot = state.snapshot();
 
-        assert!(snapshot.repositories.is_empty());
-        assert!(snapshot.managed_changes.is_empty());
+        assert!(snapshot.workspaces.is_empty());
+        assert!(snapshot.workspace_changes.is_empty());
         assert!(snapshot.recent_files.is_empty());
         assert!(snapshot.credential_refs.is_empty());
         assert_eq!(runtime.begin_search(main), 1);

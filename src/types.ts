@@ -37,7 +37,7 @@ export interface UnsavedComparison {
   externalChange: boolean
 }
 
-export type RepositoryImageLoader = (root: string, path: string) => Promise<string>
+export type WorkspaceImageLoader = (root: string, path: string) => Promise<string>
 
 export interface WorkspaceImagePreview {
   root: string

@@ -4,8 +4,13 @@ import { afterEach, describe, expect, it, vi } from 'vitest'
 import ConflictDialog from '../src/components/ConflictDialog.vue'
 import MarkdownEditor from '../src/components/MarkdownEditor.vue'
 import ThreeWayConflictResolver from '../src/components/ThreeWayConflictResolver.vue'
+import WorkspaceSidebar from '../src/components/WorkspaceSidebar.vue'
 import { i18n } from '../src/i18n'
-import type { ConflictRecord } from '../src/types'
+import type {
+  ConflictRecord,
+  WorkspaceDescriptor,
+  WorkspaceEntry,
+} from '../src/types'
 
 const mounted: Array<ReturnType<typeof createApp>> = []
 
@@ -104,7 +109,8 @@ describe('user-visible component interactions', () => {
     document.body.append(host)
     const app = createApp(MarkdownEditor, {
       modelValue: source,
-      loadRepositoryImage: async () => '',
+      loadWorkspaceImage: async () => '',
+      markdown: true,
       'onUpdate:modelValue': update,
     })
     app.use(i18n)
@@ -116,6 +122,89 @@ describe('user-visible component interactions', () => {
     expect(host.querySelector('.cm-footnote-definition')?.textContent).toContain(
       'Original citation',
     )
+    expect(update).not.toHaveBeenCalled()
+  })
+
+  it('opens a nested file from an expandable plain-workspace directory tree', async () => {
+    const opened = vi.fn()
+    const workspace: WorkspaceDescriptor = {
+      id: 'plain-folder',
+      name: '普通文件夹',
+      root: 'E:\\Notes',
+      git: null,
+    }
+    const entries: WorkspaceEntry[] = [
+      {
+        path: 'notes',
+        name: 'notes',
+        entryType: 'directory',
+        fileKind: null,
+        size: 0,
+        modifiedMs: 1,
+        readOnly: true,
+        gitStatus: null,
+      },
+      {
+        path: 'notes/today.txt',
+        name: 'today.txt',
+        entryType: 'file',
+        fileKind: 'text',
+        size: 12,
+        modifiedMs: 2,
+        readOnly: false,
+        gitStatus: null,
+      },
+    ]
+    const host = document.createElement('div')
+    document.body.append(host)
+    const app = createApp(WorkspaceSidebar, {
+      workspace,
+      entries,
+      searchQuery: '',
+      onOpenFile: opened,
+    })
+    app.use(i18n)
+    app.mount(host)
+    mounted.push(app)
+    await nextTick()
+
+    expect(host.querySelector('.sidebar-header span')?.textContent).toContain(
+      i18n.global.t('app.localWorkspace'),
+    )
+    expect(host.querySelector('button[title="notes/today.txt"]')).toBeNull()
+
+    host.querySelector<HTMLButtonElement>('button[title="notes"]')!.click()
+    await nextTick()
+    const file = host.querySelector<HTMLButtonElement>(
+      'button[title="notes/today.txt"]',
+    )
+    expect(file).not.toBeNull()
+    file!.click()
+    expect(opened).toHaveBeenCalledWith('notes/today.txt')
+    expect(host.querySelector('.file-state')).toBeNull()
+  })
+
+  it('keeps plain text literal and disables Markdown decoration', async () => {
+    const update = vi.fn()
+    const source = '# This is plain text\n[^not-a-footnote]\n'
+    const host = document.createElement('div')
+    document.body.append(host)
+    const app = createApp(MarkdownEditor, {
+      modelValue: source,
+      loadWorkspaceImage: async () => '',
+      markdown: false,
+      'onUpdate:modelValue': update,
+    })
+    app.use(i18n)
+    app.mount(host)
+    mounted.push(app)
+    await nextTick()
+
+    expect(
+      [...host.querySelectorAll('.cm-line')].map((line) => line.textContent),
+    ).toEqual(['# This is plain text', '[^not-a-footnote]', ''])
+    expect(host.querySelector('.cm-heading')).toBeNull()
+    expect(host.querySelector('.cm-footnote-reference')).toBeNull()
     expect(update).not.toHaveBeenCalled()
   })
 })

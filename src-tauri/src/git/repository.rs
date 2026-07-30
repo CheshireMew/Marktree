@@ -5,11 +5,8 @@ use std::{
 
 use crate::{
     error::{AppError, AppResult},
-    file_version::hash_bytes,
-    state::PersistentState,
     types::{
-        CredentialRecord, GitFileStatus, GitStatusSnapshot, RepositoryDescriptor,
-        WorktreeDescriptor,
+        CredentialRecord, GitCapability, GitFileStatus, GitStatusSnapshot, WorktreeDescriptor,
     },
 };
 use git2::{
@@ -21,7 +18,7 @@ use git2::{
 use super::remote::{fetch_options, remote_url, validate_remote_url};
 
 pub fn repository_lock_key(path: &str) -> String {
-    let repository = Repository::discover(path).ok();
+    let repository = Repository::open(path).ok();
     let resolved = repository
         .as_ref()
         .and_then(|repo| fs::canonicalize(repo.commondir()).ok())
@@ -41,51 +38,47 @@ pub fn repository_lock_key(path: &str) -> String {
     }
 }
 
-pub fn open_repository(path: &str, app_state: &PersistentState) -> AppResult<RepositoryDescriptor> {
-    let repo = Repository::discover(path)?;
-    let descriptor = repository_descriptor(&repo)?;
-    app_state.register_repository(&descriptor.root)?;
-    Ok(descriptor)
+pub fn has_git_capability(path: &str) -> bool {
+    Path::new(path).join(".git").exists() && Repository::open(path).is_ok()
 }
 
-pub fn initialize_repository(
-    path: &str,
-    app_state: &PersistentState,
-) -> AppResult<RepositoryDescriptor> {
+pub fn git_capability(path: &str) -> AppResult<Option<GitCapability>> {
+    if !Path::new(path).join(".git").exists() {
+        return Ok(None);
+    }
+    Ok(Some(capability(&Repository::open(path)?)?))
+}
+
+pub fn initialize_repository(path: &str) -> AppResult<GitCapability> {
     fs::create_dir_all(path)?;
     let mut options = RepositoryInitOptions::new();
     options.initial_head("main");
     let repo = Repository::init_opts(path, &options)?;
-    let descriptor = repository_descriptor(&repo)?;
-    app_state.register_repository(&descriptor.root)?;
-    Ok(descriptor)
+    capability(&repo)
 }
 
 pub fn clone_repository(
     remote_url: &str,
     path: &str,
     credential: Option<CredentialRecord>,
-    app_state: &PersistentState,
-) -> AppResult<RepositoryDescriptor> {
+) -> AppResult<GitCapability> {
     validate_remote_url(remote_url)?;
     let fetch_options = fetch_options(credential);
     let mut builder = RepoBuilder::new();
     builder.fetch_options(fetch_options);
     let repo = builder.clone(remote_url, Path::new(path))?;
-    let descriptor = repository_descriptor(&repo)?;
-    app_state.register_repository(&descriptor.root)?;
-    Ok(descriptor)
+    capability(&repo)
 }
 
-pub fn refresh_repository(root: &str) -> AppResult<RepositoryDescriptor> {
-    repository_descriptor(&Repository::open(root)?)
+pub fn refresh_repository(root: &str) -> AppResult<GitCapability> {
+    capability(&Repository::open(root)?)
 }
 
 pub fn repository_status(root: &str) -> AppResult<GitStatusSnapshot> {
     status_snapshot(&Repository::open(root)?)
 }
 
-fn repository_descriptor(repo: &Repository) -> AppResult<RepositoryDescriptor> {
+fn capability(repo: &Repository) -> AppResult<GitCapability> {
     let main = main_repository(repo)?;
     let main_root = workdir_string(&main)?;
     let mut worktrees = vec![descriptor_for_worktree(
@@ -117,15 +110,7 @@ fn repository_descriptor(repo: &Repository) -> AppResult<RepositoryDescriptor> {
     let common_dir = fs::canonicalize(main.commondir())?
         .to_string_lossy()
         .into_owned();
-    let id = hash_bytes(repository_lock_key(&main_root).as_bytes())[..16].to_owned();
-    let name = Path::new(&main_root)
-        .file_name()
-        .map(|value| value.to_string_lossy().into_owned())
-        .unwrap_or_else(|| "Repository".to_owned());
-    Ok(RepositoryDescriptor {
-        id,
-        name,
-        root: main_root,
+    Ok(GitCapability {
         common_dir,
         remote_url: remote_url(&main),
         status: status_snapshot(repo)?,

@@ -10,8 +10,8 @@ use crate::{
     paths::normalize_relative,
     state::PersistentState,
     types::{
-        LineEnding, ManagedChangeKind, RepositoryConfig, SaveDocumentRequest,
-        SaveRepositoryConfigRequest, TextEncoding,
+        LineEnding, SaveDocumentRequest, SaveWorkspaceConfigRequest, TextEncoding, WorkspaceConfig,
+        WorkspaceEntryType,
     },
 };
 
@@ -132,8 +132,11 @@ fn mixed_and_unsupported_text_formats_are_reported_when_opened() {
     fs::write(repository.path().join("mixed.md"), b"# Mixed\r\nLF\nCR\r").unwrap();
     fs::write(repository.path().join("legacy.md"), [0xff, 0xfe, 0x41]).unwrap();
 
-    let documents = list_documents(&root, &[]).unwrap();
-    assert_eq!(documents.len(), 2);
+    let entries = list_workspace_entries(&root, &[]).unwrap();
+    assert_eq!(entries.len(), 2);
+    assert!(entries
+        .iter()
+        .all(|entry| entry.entry_type == WorkspaceEntryType::File));
     let mixed = read_document(&root, "mixed.md").unwrap();
     assert_eq!(mixed.encoding, TextEncoding::Utf8);
     assert_eq!(mixed.line_ending, LineEnding::Mixed);
@@ -195,14 +198,14 @@ fn a_confirmed_deletion_cannot_overwrite_a_file_that_reappeared() {
 }
 
 #[test]
-fn image_preview_reads_the_exact_asset_bytes_from_the_repository() {
-    let repository = TempDir::new().unwrap();
-    let image = repository.path().join("assets").join("diagram.png");
+fn image_preview_reads_the_exact_asset_bytes_from_the_workspace() {
+    let workspace = TempDir::new().unwrap();
+    let image = workspace.path().join("assets").join("diagram.png");
     fs::create_dir_all(image.parent().unwrap()).unwrap();
     let bytes = b"\x89PNG\r\n\x1a\npreview";
     fs::write(&image, bytes).unwrap();
 
-    let preview = read_asset(repository.path().to_str().unwrap(), "assets/diagram.png").unwrap();
+    let preview = read_asset(workspace.path().to_str().unwrap(), "assets/diagram.png").unwrap();
 
     assert_eq!(preview.path, "assets/diagram.png");
     assert_eq!(preview.media_type, "image/png");
@@ -234,16 +237,11 @@ fn content_addressed_asset_write_repairs_a_corrupt_existing_blob() {
 
     assert_eq!(written.path, relative);
     assert_eq!(fs::read(destination).unwrap(), intended);
-    assert!(state
-        .managed_changes(&root)
-        .iter()
-        .any(|change| change.path == written.path
-            && change.sha256 == sha256
-            && change.kind == ManagedChangeKind::Asset));
+    assert!(state.workspace_changes(&root).is_empty());
 }
 
 #[test]
-fn external_repository_config_change_is_never_overwritten() {
+fn external_workspace_config_change_is_never_overwritten() {
     let repository = TempDir::new().unwrap();
     let app_data = TempDir::new().unwrap();
     let state = PersistentState::load(app_data.path()).unwrap();
@@ -252,17 +250,17 @@ fn external_repository_config_change_is_never_overwritten() {
     fs::create_dir(&config_dir).unwrap();
     let config_path = config_dir.join("config.json");
     fs::write(&config_path, r#"{"assetsDir":"assets","ignoreRules":[]}"#).unwrap();
-    let opened = read_repository_config(&root).unwrap();
+    let opened = read_workspace_config(&root).unwrap();
     fs::write(
         &config_path,
         r#"{"assetsDir":"external-assets","ignoreRules":[]}"#,
     )
     .unwrap();
 
-    let error = save_repository_config(
-        SaveRepositoryConfigRequest {
+    let error = save_workspace_config(
+        SaveWorkspaceConfigRequest {
             root,
-            config: RepositoryConfig {
+            config: WorkspaceConfig {
                 assets_dir: "editor-assets".to_owned(),
                 ignore_rules: Vec::new(),
             },
@@ -281,18 +279,18 @@ fn external_repository_config_change_is_never_overwritten() {
 }
 
 #[test]
-fn repository_metadata_files_are_not_exposed_as_documents() {
-    let repository = TempDir::new().unwrap();
-    fs::write(repository.path().join(".git"), "gitdir: elsewhere").unwrap();
-    fs::create_dir(repository.path().join(".marktree")).unwrap();
+fn workspace_internal_files_are_not_exposed_as_entries() {
+    let workspace = TempDir::new().unwrap();
+    fs::write(workspace.path().join(".git"), "gitdir: elsewhere").unwrap();
+    fs::create_dir(workspace.path().join(".marktree")).unwrap();
     fs::write(
-        repository.path().join(".marktree").join("config.json"),
+        workspace.path().join(".marktree").join("config.json"),
         r#"{"assetsDir":"assets","ignoreRules":[]}"#,
     )
     .unwrap();
-    fs::write(repository.path().join("visible.md"), "# Visible\n").unwrap();
+    fs::write(workspace.path().join("visible.md"), "# Visible\n").unwrap();
 
-    let listed = list_documents(repository.path().to_str().unwrap(), &[]).unwrap();
+    let listed = list_workspace_entries(workspace.path().to_str().unwrap(), &[]).unwrap();
 
     assert_eq!(listed.len(), 1);
     assert_eq!(listed[0].path, "visible.md");

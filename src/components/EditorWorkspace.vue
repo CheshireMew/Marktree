@@ -2,7 +2,7 @@
 import { FileText, GitCompareArrows, LockKeyhole, X } from 'lucide-vue-next'
 import { computed, ref } from 'vue'
 
-import type { EditorTab, RepositoryImageLoader } from '@/types'
+import type { EditorTab, WorkspaceImageLoader } from '@/types'
 import MarkdownEditor from './MarkdownEditor.vue'
 
 const editor = ref<InstanceType<typeof MarkdownEditor>>()
@@ -12,7 +12,8 @@ const props = defineProps<{
   activeTab?: EditorTab
   activeKey?: string
   dark: boolean
-  loadRepositoryImage: RepositoryImageLoader
+  canCompare?: boolean
+  loadWorkspaceImage: WorkspaceImageLoader
 }>()
 
 defineEmits<{
@@ -28,6 +29,7 @@ function key(tab: EditorTab) {
 }
 
 const headings = computed(() => {
+  if (!activeIsMarkdown.value) return []
   const content = props.activeTab?.content ?? ''
   const results: Array<{ text: string; level: number; position: number }> = []
   const pattern = /^(#{1,6})\s+(.+)$/gm
@@ -40,6 +42,10 @@ const headings = computed(() => {
   }
   return results
 })
+
+const activeIsMarkdown = computed(() =>
+  /\.(?:md|markdown|mdx)$/i.test(props.activeTab?.path ?? ''),
+)
 </script>
 
 <template>
@@ -106,7 +112,11 @@ const headings = computed(() => {
                     : $t('app.save')
             }}
           </span>
-          <button class="icon-text-button" @click="$emit('diff')">
+          <button
+            v-if="activeTab.dirty || canCompare"
+            class="icon-text-button"
+            @click="$emit('diff')"
+          >
             <GitCompareArrows :size="15" /> {{ $t('app.diff') }}
           </button>
         </div>
@@ -119,7 +129,8 @@ const headings = computed(() => {
         :dark="dark"
         :root="activeTab.root"
         :path="activeTab.path"
-        :load-repository-image="loadRepositoryImage"
+        :markdown="activeIsMarkdown"
+        :load-workspace-image="loadWorkspaceImage"
         @update:model-value="$emit('updateContent', $event)"
         @asset="(file, cursor) => $emit('asset', file, cursor)"
       />
@@ -127,8 +138,8 @@ const headings = computed(() => {
 
     <div v-else class="empty-editor">
       <img src="/marktree.svg" alt="" />
-      <h2>{{ $t('app.noRepository') }}</h2>
-      <p>{{ $t('app.noRepositoryHint') }}</p>
+      <h2>{{ $t('app.noDocument') }}</h2>
+      <p>{{ $t('app.noDocumentHint') }}</p>
     </div>
   </main>
 </template>

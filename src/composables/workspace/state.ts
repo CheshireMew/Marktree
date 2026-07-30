@@ -4,20 +4,21 @@ import { readableError } from '@/lib/errors'
 import type {
   BranchDescriptor,
   ConflictRecord,
-  DocumentDescriptor,
   EditorTab,
   GitStatusSnapshot,
   PendingGitOperation,
-  RepositoryDescriptor,
+  TrashEntry,
   UnsavedComparison,
   WorkspaceDiffResult,
+  WorkspaceDescriptor,
+  WorkspaceEntry,
   WorkspaceImagePreview,
   WorktreeSearchResult,
 } from '@/types'
 
 export interface WorkspaceSession {
   root: string
-  documents: DocumentDescriptor[]
+  entries: WorkspaceEntry[]
   branches: BranchDescriptor[]
   tabs: EditorTab[]
   activeTabKey?: string
@@ -30,11 +31,12 @@ export interface WorkspaceSession {
   searchGeneration: number
 }
 
-export const repositories = ref<RepositoryDescriptor[]>([])
-export const activeRepositoryId = ref<string>()
+export const workspaces = ref<WorkspaceDescriptor[]>([])
+export const activeWorkspaceId = ref<string>()
 export const activeWorktreePath = ref<string>()
 export const sessions = reactive(new Map<string, WorkspaceSession>())
 export const recentFiles = ref<string[]>([])
+export const trashEntries = ref<TrashEntry[]>([])
 export const loading = ref(false)
 export const syncing = ref(false)
 export const message = ref('')
@@ -47,20 +49,22 @@ export const externalComparison = computed(() => externalComparisons.value[0])
 
 let loadingOperations = 0
 
-export const activeRepository = computed(() =>
-  repositories.value.find((repository) => repository.id === activeRepositoryId.value),
+export const activeWorkspace = computed(() =>
+  workspaces.value.find((workspace) => workspace.id === activeWorkspaceId.value),
 )
 
 export const activeWorktree = computed(() => {
-  const repository = activeRepository.value
-  if (!repository) return undefined
+  const capability = activeWorkspace.value?.git
+  if (!capability) return undefined
   return (
-    repository.worktrees.find((worktree) => worktree.path === activeWorktreePath.value) ??
-    repository.worktrees[0]
+    capability.worktrees.find((worktree) => worktree.path === activeWorktreePath.value) ??
+    capability.worktrees[0]
   )
 })
 
-export const activeRoot = computed(() => activeWorktree.value?.path)
+export const activeRoot = computed(
+  () => activeWorktree.value?.path ?? activeWorkspace.value?.root,
+)
 export const activeStatus = computed<GitStatusSnapshot | undefined>(
   () => activeWorktree.value?.status,
 )
@@ -68,7 +72,10 @@ export const activeSession = computed(() => {
   const root = activeRoot.value
   return root ? sessions.get(root) : undefined
 })
-export const documents = computed(() => activeSession.value?.documents ?? [])
+export const entries = computed(() => activeSession.value?.entries ?? [])
+export const documents = computed(() =>
+  entries.value.filter((entry) => entry.entryType === 'file'),
+)
 export const branches = computed(() => activeSession.value?.branches ?? [])
 export const tabs = computed(() => activeSession.value?.tabs ?? [])
 export const activeTabKey = computed<string | undefined>({
@@ -95,15 +102,25 @@ export const crossWorktreeMatches = computed(
 export const conflicts = computed(() => activeSession.value?.conflicts ?? [])
 export const pendingOperation = computed(() => activeSession.value?.pendingOperation)
 
-export const filteredDocuments = computed(() => {
+export const filteredEntries = computed(() => {
   const session = activeSession.value
   const needle = session?.searchQuery.trim().toLowerCase() ?? ''
-  if (!needle) return documents.value
+  if (!needle) return entries.value
   const contentMatches = new Set(session?.searchMatches ?? [])
-  return documents.value.filter(
-    (document) =>
-      document.path.toLowerCase().includes(needle) || contentMatches.has(document.path),
+  const matchedFiles = entries.value.filter(
+    (entry) =>
+      entry.entryType === 'file' &&
+      (entry.path.toLowerCase().includes(needle) || contentMatches.has(entry.path)),
   )
+  const visiblePaths = new Set(matchedFiles.map((entry) => entry.path))
+  for (const file of matchedFiles) {
+    const parts = file.path.split('/')
+    while (parts.length > 1) {
+      parts.pop()
+      visiblePaths.add(parts.join('/'))
+    }
+  }
+  return entries.value.filter((entry) => visiblePaths.has(entry.path))
 })
 
 export const quickOpenDocuments = computed(() => {
@@ -122,7 +139,7 @@ export function ensureSession(root: string): WorkspaceSession {
   if (!session) {
     session = reactive<WorkspaceSession>({
       root,
-      documents: [],
+      entries: [],
       branches: [],
       tabs: [],
       searchQuery: '',
@@ -138,20 +155,22 @@ export function ensureSession(root: string): WorkspaceSession {
   return session
 }
 
-export function addOrReplaceRepository(descriptor: RepositoryDescriptor) {
-  const index = repositories.value.findIndex((item) => item.id === descriptor.id)
-  if (index < 0) repositories.value.push(descriptor)
-  else repositories.value[index] = descriptor
+export function addOrReplaceWorkspace(descriptor: WorkspaceDescriptor) {
+  const index = workspaces.value.findIndex((item) => item.id === descriptor.id)
+  if (index < 0) workspaces.value.push(descriptor)
+  else workspaces.value[index] = descriptor
 }
 
 export function updateWorktreeStatus(root: string, status: GitStatusSnapshot) {
-  for (const repository of repositories.value) {
-    const worktree = repository.worktrees.find((item) => item.path === root)
+  for (const workspace of workspaces.value) {
+    const capability = workspace.git
+    if (!capability) continue
+    const worktree = capability.worktrees.find((item) => item.path === root)
     if (worktree) {
       worktree.status = status
       worktree.branch = status.branch
     }
-    if (repository.root === root) repository.status = status
+    if (workspace.root === root) capability.status = status
   }
 }
 

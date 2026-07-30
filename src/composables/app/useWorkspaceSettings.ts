@@ -7,26 +7,26 @@ import { isTauri, nativeApi } from '@/lib/api'
 import { readableError } from '@/lib/errors'
 import type { AuthConfiguration, GithubDeviceCode } from '@/types'
 
-import type { AppModal, RepositoryDialogForm } from './dialogState'
+import type { AppModal, WorkspaceDialogForm } from './dialogState'
 
 type Workspace = ReturnType<typeof useWorkspace>
 type GithubCredentialTarget =
   | { kind: 'clone' }
-  | { kind: 'repository'; repositoryId: string; root: string }
+  | { kind: 'workspace'; workspaceId: string; root: string }
 
-export function useRepositorySettings(
+export function useWorkspaceSettings(
   workspace: Workspace,
   modal: Ref<AppModal | undefined>,
-  form: RepositoryDialogForm,
-  clearRepositoryTimers: (roots: Iterable<string>) => void,
+  form: WorkspaceDialogForm,
+  clearWorkspaceTimers: (roots: Iterable<string>) => void,
 ) {
   const authConfiguration = ref<AuthConfiguration>()
   const githubDevice = ref<GithubDeviceCode>()
   const githubPending = ref(false)
   const cloneCredentialId = ref<string>()
-  const repositoryConfigSha256 = ref<string | null>(null)
-  const repositoryConfigMissing = ref(true)
-  const repositoryConfigRoot = ref<string>()
+  const workspaceConfigSha256 = ref<string | null>(null)
+  const workspaceConfigMissing = ref(true)
+  const workspaceConfigRoot = ref<string>()
   let githubPollTimer: number | undefined
 
   async function loadAuthConfiguration() {
@@ -46,24 +46,25 @@ export function useRepositorySettings(
     }
   }
 
-  async function openCredentials() {
-    modal.value = 'credentials'
+  async function openSettings() {
+    modal.value = 'settings'
     form.credentialUsername = ''
     form.credentialToken = ''
     githubDevice.value = undefined
-    repositoryConfigRoot.value = workspace.activeRoot.value
-    repositoryConfigSha256.value = null
-    repositoryConfigMissing.value = true
+    workspaceConfigRoot.value = workspace.activeRoot.value
+    workspaceConfigSha256.value = null
+    workspaceConfigMissing.value = true
     try {
       await loadAuthConfiguration()
       if (isTauri() && workspace.activeRoot.value) {
-        const snapshot = await nativeApi.readRepositoryConfig({
+        await workspace.loadWorkspaceTrash()
+        const snapshot = await nativeApi.readWorkspaceConfig({
           root: workspace.activeRoot.value,
         })
         form.assetsDir = snapshot.config.assetsDir
         form.ignoreRules = snapshot.config.ignoreRules.join('\n')
-        repositoryConfigSha256.value = snapshot.sha256
-        repositoryConfigMissing.value = snapshot.missing
+        workspaceConfigSha256.value = snapshot.sha256
+        workspaceConfigMissing.value = snapshot.missing
       }
     } catch (reason) {
       workspace.error.value = readableError(reason)
@@ -71,10 +72,10 @@ export function useRepositorySettings(
   }
 
   async function saveGenericCredential() {
-    const repository = workspace.activeRepository.value
+    const activeWorkspace = workspace.activeWorkspace.value
     const root = workspace.activeRoot.value
-    if (!repository || !root || !form.credentialToken.trim()) return
-    const id = `repository-${repository.id}`
+    if (!activeWorkspace?.git || !root || !form.credentialToken.trim()) return
+    const id = `workspace-${activeWorkspace.id}`
     try {
       await nativeApi.saveCredential({
         input: {
@@ -83,7 +84,7 @@ export function useRepositorySettings(
           token: form.credentialToken.trim(),
         },
       })
-      await nativeApi.setRepositoryCredential({ root, credentialId: id })
+      await nativeApi.setWorkspaceGitCredential({ root, credentialId: id })
       workspace.message.value = i18n.global.t('app.credentialSaved')
       closeModal()
     } catch (reason) {
@@ -91,11 +92,11 @@ export function useRepositorySettings(
     }
   }
 
-  async function saveRepositoryConfig() {
-    const root = repositoryConfigRoot.value
+  async function saveWorkspaceConfig() {
+    const root = workspaceConfigRoot.value
     if (!root) return
     try {
-      const snapshot = await nativeApi.saveRepositoryConfig({
+      const snapshot = await nativeApi.saveWorkspaceConfig({
         request: {
           root,
           config: {
@@ -105,12 +106,12 @@ export function useRepositorySettings(
               .map((rule) => rule.trim())
               .filter(Boolean),
           },
-          expectedSha256: repositoryConfigSha256.value,
-          expectedMissing: repositoryConfigMissing.value,
+          expectedSha256: workspaceConfigSha256.value,
+          expectedMissing: workspaceConfigMissing.value,
         },
       })
-      repositoryConfigSha256.value = snapshot.sha256
-      repositoryConfigMissing.value = snapshot.missing
+      workspaceConfigSha256.value = snapshot.sha256
+      workspaceConfigMissing.value = snapshot.missing
       workspace.message.value = i18n.global.t('app.settingsSaved')
       await workspace.loadDocuments()
     } catch (reason) {
@@ -118,13 +119,14 @@ export function useRepositorySettings(
     }
   }
 
-  async function forgetActiveRepository() {
-    if (!window.confirm(i18n.global.t('app.forgetRepositoryConfirm'))) return
+  async function forgetActiveWorkspace() {
+    if (!window.confirm(i18n.global.t('app.forgetWorkspaceConfirm'))) return
     const roots =
-      workspace.activeRepository.value?.worktrees.map((worktree) => worktree.path) ?? []
-    clearRepositoryTimers(roots)
+      workspace.activeWorkspace.value?.git?.worktrees.map((worktree) => worktree.path) ??
+      (workspace.activeWorkspace.value ? [workspace.activeWorkspace.value.root] : [])
+    clearWorkspaceTimers(roots)
     try {
-      await workspace.forgetActiveRepository()
+      await workspace.forgetActiveWorkspace()
       closeModal()
     } catch (reason) {
       workspace.error.value = readableError(reason)
@@ -135,10 +137,10 @@ export function useRepositorySettings(
     const target: GithubCredentialTarget =
       modal.value === 'clone'
         ? { kind: 'clone' }
-        : workspace.activeRepository.value && workspace.activeRoot.value
+        : workspace.activeWorkspace.value?.git && workspace.activeRoot.value
           ? {
-              kind: 'repository',
-              repositoryId: workspace.activeRepository.value.id,
+              kind: 'workspace',
+              workspaceId: workspace.activeWorkspace.value.id,
               root: workspace.activeRoot.value,
             }
           : { kind: 'clone' }
@@ -156,7 +158,7 @@ export function useRepositorySettings(
     if (!githubDevice.value) return
     const delay = Math.max(githubDevice.value.interval, 5) * 1000
     githubPollTimer = window.setTimeout(async () => {
-      const expectedModal = target.kind === 'clone' ? 'clone' : 'credentials'
+      const expectedModal = target.kind === 'clone' ? 'clone' : 'settings'
       if (!githubDevice.value || modal.value !== expectedModal) return
       try {
         const token = await nativeApi.pollGithubDeviceFlow({
@@ -166,7 +168,7 @@ export function useRepositorySettings(
           const id =
             target.kind === 'clone'
               ? (cloneCredentialId.value ??= `clone-${crypto.randomUUID()}`)
-              : `github-${target.repositoryId}`
+              : `github-${target.workspaceId}`
           await nativeApi.saveCredential({
             input: { id, username: 'x-access-token', token: token.accessToken },
           })
@@ -175,7 +177,7 @@ export function useRepositorySettings(
           if (target.kind === 'clone') {
             workspace.message.value = i18n.global.t('app.githubCredentialReady')
           } else {
-            await nativeApi.setRepositoryCredential({
+            await nativeApi.setWorkspaceGitCredential({
               root: target.root,
               credentialId: id,
             })
@@ -213,13 +215,13 @@ export function useRepositorySettings(
     githubDevice,
     githubPending,
     cloneCredentialId,
-    repositoryConfigSha256,
-    repositoryConfigMissing,
+    workspaceConfigSha256,
+    workspaceConfigMissing,
     prepareCloneCredentials,
-    openCredentials,
+    openSettings,
     saveGenericCredential,
-    saveRepositoryConfig,
-    forgetActiveRepository,
+    saveWorkspaceConfig,
+    forgetActiveWorkspace,
     beginGithubLogin,
     closeModal,
   }

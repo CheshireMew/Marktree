@@ -1,7 +1,7 @@
 import { i18n } from '@/i18n'
 import { isTauri, nativeApi } from '@/lib/api'
 import {
-  activeRepository,
+  activeWorkspace,
   activeRoot,
   activeTab,
   beginLoading,
@@ -10,12 +10,14 @@ import {
   fileName,
   imagePreview,
   message,
+  externalComparisons,
   recentFiles,
   setError,
   tabKey,
+  trashEntries,
   updateWorktreeStatus,
 } from './state'
-import { reconcileOpenTabs, scheduleSave } from './persistence'
+import { flushAll, reconcileOpenTabs, scheduleSave } from './persistence'
 import { demoContents } from './demoData'
 
 export async function loadDocuments(requestedRoot = activeRoot.value) {
@@ -25,23 +27,26 @@ export async function loadDocuments(requestedRoot = activeRoot.value) {
   const generation = ++session.loadGeneration
   beginLoading()
   try {
-    const [status, branchList, pendingOperation] = await Promise.all([
-      nativeApi.repositoryStatus({ root }),
-      nativeApi.listBranches({ root }),
-      nativeApi.pendingGitOperation({ root }),
-    ])
-    const pendingConflicts = await nativeApi.pendingConflicts({ root })
-    const nextDocuments = await nativeApi.listDocuments({ root, statuses: status.files })
+    const nextEntries = await nativeApi.listWorkspaceEntries({ root })
+    const gitEnabled = Boolean(activeWorkspace.value?.git)
+    const [status, branchList, pendingOperation, pendingConflicts] = gitEnabled
+      ? await Promise.all([
+          nativeApi.workspaceGitStatus({ root }),
+          nativeApi.listBranches({ root }),
+          nativeApi.pendingGitOperation({ root }),
+          nativeApi.pendingConflicts({ root }),
+        ])
+      : [undefined, [], null, []]
     if (session.loadGeneration !== generation) return
     if (!pendingOperation && !pendingConflicts.length) {
-      await reconcileOpenTabs(session, nextDocuments, generation)
+      await reconcileOpenTabs(session, nextEntries, generation)
       if (session.loadGeneration !== generation) return
     }
-    updateWorktreeStatus(root, status)
+    if (status) updateWorktreeStatus(root, status)
     session.branches = branchList
     session.conflicts = pendingConflicts
     session.pendingOperation = pendingOperation ?? undefined
-    session.documents = nextDocuments
+    session.entries = nextEntries
     if (pendingOperation && !pendingConflicts.length) {
       message.value = i18n.global.t('app.pendingGitOperation')
     }
@@ -52,7 +57,7 @@ export async function loadDocuments(requestedRoot = activeRoot.value) {
   }
 }
 
-export async function loadRepositoryImage(root: string, path: string) {
+export async function loadWorkspaceImage(root: string, path: string) {
   const preview = await nativeApi.readAsset({ root, path })
   return `data:${preview.mediaType};base64,${preview.base64Data}`
 }
@@ -60,23 +65,27 @@ export async function loadRepositoryImage(root: string, path: string) {
 export async function openDocument(path: string) {
   const root = activeRoot.value
   if (!root) return
-  const descriptor = ensureSession(root).documents.find(
-    (document) => document.path === path,
+  const descriptor = ensureSession(root).entries.find(
+    (entry) => entry.path === path,
   )
-  if (descriptor?.kind === 'image') {
+  if (descriptor?.fileKind === 'image') {
     try {
       imagePreview.value = {
         root,
         path,
-        url: await loadRepositoryImage(root, path),
+        url: await loadWorkspaceImage(root, path),
       }
     } catch (reason) {
       setError(reason)
     }
     return
   }
-  if (descriptor?.kind === 'other') {
-    setError(i18n.global.t('app.unsupportedPreview'))
+  if (descriptor?.fileKind === 'other') {
+    try {
+      await nativeApi.openWorkspaceFileWithSystem({ root, path })
+    } catch (reason) {
+      setError(reason)
+    }
     return
   }
   const key = tabKey(root, path)
@@ -188,11 +197,17 @@ export async function search() {
   const generation = ++session.searchGeneration
   const query = session.searchQuery
   try {
-    const matches = await nativeApi.searchWorktrees({
-      root: activeRepository.value?.root ?? root,
-      query,
-      limit: 120,
-    })
+    const matches = activeWorkspace.value?.git
+      ? await nativeApi.searchWorktrees({
+          root: activeWorkspace.value.root,
+          query,
+          limit: 120,
+        })
+      : (await nativeApi.searchDocuments({ root, query, limit: 120 })).map((path) => ({
+          worktree: activeWorkspace.value?.name ?? '',
+          root,
+          path,
+        }))
     if (session.searchGeneration !== generation || session.searchQuery !== query) return
     session.crossWorktreeMatches = matches
     session.searchMatches = matches
@@ -203,6 +218,145 @@ export async function search() {
   }
 }
 
-export async function handleRepositoryChanged(root: string) {
+export async function handleWorkspaceChanged(root: string) {
   await loadDocuments(root)
+}
+
+export async function createFolder(path: string): Promise<boolean> {
+  const root = activeRoot.value
+  if (!root || !isTauri()) return false
+  try {
+    await nativeApi.createWorkspaceFolder({ root, path })
+    await loadDocuments(root)
+    return true
+  } catch (reason) {
+    setError(reason)
+    return false
+  }
+}
+
+export async function moveWorkspaceEntry(
+  sourcePath: string,
+  destinationPath: string,
+): Promise<boolean> {
+  const root = activeRoot.value
+  if (!root || !isTauri()) return false
+  try {
+    await prepareEntryOperation(root, sourcePath)
+    const result = await nativeApi.moveWorkspaceEntry({
+      request: { root, sourcePath, destinationPath },
+    })
+    migrateOpenPaths(root, result.movedFiles)
+    await loadDocuments(root)
+    return true
+  } catch (reason) {
+    setError(reason)
+    return false
+  }
+}
+
+export async function trashWorkspaceEntry(path: string): Promise<boolean> {
+  const root = activeRoot.value
+  if (!root || !isTauri()) return false
+  try {
+    await prepareEntryOperation(root, path)
+    await nativeApi.trashWorkspaceEntry({ root, path })
+    trashEntries.value = await nativeApi.listWorkspaceTrash()
+    const session = ensureSession(root)
+    session.tabs = session.tabs.filter((tab) => !pathContains(path, tab.path))
+    if (session.activeTabKey && pathContains(path, session.activeTabKey.split('\n')[1] ?? '')) {
+      session.activeTabKey = undefined
+    }
+    recentFiles.value = recentFiles.value.filter((key) => {
+      const [keyRoot, keyPath] = key.split('\n')
+      return keyRoot !== root || !pathContains(path, keyPath ?? '')
+    })
+    await loadDocuments(root)
+    return true
+  } catch (reason) {
+    setError(reason)
+    return false
+  }
+}
+
+export async function openWithSystem(path: string) {
+  const root = activeRoot.value
+  if (!root || !isTauri()) return
+  try {
+    await nativeApi.openWorkspaceFileWithSystem({ root, path })
+  } catch (reason) {
+    setError(reason)
+  }
+}
+
+export async function loadWorkspaceTrash() {
+  if (!isTauri()) return
+  try {
+    trashEntries.value = await nativeApi.listWorkspaceTrash()
+  } catch (reason) {
+    setError(reason)
+  }
+}
+
+export async function restoreWorkspaceTrash(id: string) {
+  if (!isTauri()) return
+  try {
+    const restored = await nativeApi.restoreWorkspaceTrash({ id })
+    trashEntries.value = await nativeApi.listWorkspaceTrash()
+    if (restored.workspaceRoot === activeRoot.value) {
+      await loadDocuments(restored.workspaceRoot)
+    }
+  } catch (reason) {
+    setError(reason)
+  }
+}
+
+export async function emptyWorkspaceTrash() {
+  if (!isTauri() || !window.confirm(i18n.global.t('app.emptyTrashConfirm'))) return
+  try {
+    await nativeApi.emptyWorkspaceTrash()
+    trashEntries.value = []
+  } catch (reason) {
+    setError(reason)
+  }
+}
+
+async function prepareEntryOperation(root: string, path: string) {
+  if (
+    externalComparisons.value.some(
+      (comparison) => comparison.root === root && pathContains(path, comparison.path),
+    )
+  ) {
+    throw new Error(i18n.global.t('app.resolveExternalChangeFirst'))
+  }
+  await flushAll(root)
+}
+
+function migrateOpenPaths(
+  root: string,
+  moves: Array<{ oldPath: string; newPath: string }>,
+) {
+  const session = ensureSession(root)
+  const byOldPath = new Map(moves.map((move) => [move.oldPath, move.newPath]))
+  for (const tab of session.tabs) {
+    const nextPath = byOldPath.get(tab.path)
+    if (!nextPath) continue
+    const wasActive = session.activeTabKey === tabKey(root, tab.path)
+    tab.path = nextPath
+    tab.title = fileName(nextPath)
+    if (wasActive) session.activeTabKey = tabKey(root, nextPath)
+  }
+  recentFiles.value = recentFiles.value.map((key) => {
+    const [keyRoot, keyPath] = key.split('\n')
+    const nextPath = keyRoot === root ? byOldPath.get(keyPath ?? '') : undefined
+    return nextPath ? tabKey(root, nextPath) : key
+  })
+  if (imagePreview.value?.root === root) {
+    const nextPath = byOldPath.get(imagePreview.value.path)
+    if (nextPath) imagePreview.value.path = nextPath
+  }
+}
+
+function pathContains(parent: string, candidate: string) {
+  return candidate === parent || candidate.startsWith(`${parent}/`)
 }

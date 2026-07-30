@@ -14,7 +14,7 @@ pub fn save_credential(input: CredentialInput) -> AppResult<()> {
 }
 
 #[tauri::command(async)]
-pub fn set_repository_credential(
+pub fn set_workspace_git_credential(
     root: String,
     credential_id: String,
     state: State<'_, PersistentState>,

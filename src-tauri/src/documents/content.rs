@@ -4,14 +4,15 @@ use crate::{
     content_policy::document_kind,
     error::{AppError, AppResult},
     file_version::{hash_bytes, verify_expected_version},
+    git,
     paths::{
         atomic_create, atomic_write, canonical_root, normalize_relative, resolve_existing_file,
         resolve_for_write,
     },
     state::PersistentState,
     types::{
-        DocumentContent, DocumentKind, LineEnding, ManagedChangeKind, SaveDocumentRequest,
-        SaveDocumentResult, TextEncoding,
+        DocumentContent, DocumentKind, LineEnding, SaveDocumentRequest, SaveDocumentResult,
+        TextEncoding, WorkspaceChangeOperation,
     },
 };
 
@@ -35,7 +36,7 @@ pub fn read_document(root: &str, path: &str) -> AppResult<DocumentContent> {
         content,
         modified_ms: modified_ms(&metadata),
         sha256: hash_bytes(&bytes),
-        read_only: kind != DocumentKind::Markdown,
+        read_only: encoding == TextEncoding::Unsupported,
         encoding,
         line_ending: detect_line_ending(text_bytes),
     })
@@ -58,9 +59,12 @@ pub fn save_document(
     let root_path = canonical_root(&request.root)?;
     let relative = normalize_relative(&request.path)?;
     let file_path = resolve_for_write(&root_path, &relative)?;
-    if document_kind(&file_path) != DocumentKind::Markdown {
+    if !matches!(
+        document_kind(&file_path),
+        DocumentKind::Markdown | DocumentKind::Text
+    ) {
         return Err(AppError::Message(
-            "Only Markdown documents can be edited.".to_owned(),
+            "Only Markdown and supported plain-text files can be edited.".to_owned(),
         ));
     }
 
@@ -80,12 +84,14 @@ pub fn save_document(
     }
     let bytes = encode_text(&request.content, request.encoding);
     let sha256 = hash_bytes(&bytes);
-    app_state.record_change(
-        &request.root,
-        &relative,
-        &sha256,
-        ManagedChangeKind::Document,
-    )?;
+    if git::has_git_capability(&request.root) {
+        app_state.record_workspace_change(
+            &request.root,
+            &relative,
+            WorkspaceChangeOperation::Upsert,
+            Some(&sha256),
+        )?;
+    }
     atomic_write(&file_path, &bytes)?;
     let metadata = fs::metadata(&file_path)?;
     let _ = app_state.remember_file(&request.root, &relative);
@@ -111,16 +117,26 @@ pub fn create_document(
             "A file already exists at that path.".to_owned(),
         ));
     }
-    if document_kind(&file_path) != DocumentKind::Markdown {
+    if !matches!(
+        document_kind(&file_path),
+        DocumentKind::Markdown | DocumentKind::Text
+    ) {
         return Err(AppError::Message(
-            "New documents must use .md, .markdown, or .mdx.".to_owned(),
+            "New editable files must use a supported Markdown or text extension.".to_owned(),
         ));
     }
     if let Some(parent) = file_path.parent() {
         fs::create_dir_all(parent)?;
     }
     let sha256 = hash_bytes(b"");
-    app_state.record_change(root, &relative, &sha256, ManagedChangeKind::Document)?;
+    if git::has_git_capability(root) {
+        app_state.record_workspace_change(
+            root,
+            &relative,
+            WorkspaceChangeOperation::Upsert,
+            Some(&sha256),
+        )?;
+    }
     atomic_create(&file_path, b"")?;
     read_document(root, &relative)
 }

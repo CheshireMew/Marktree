@@ -1,13 +1,112 @@
+.app-frame {
+  display: grid;
+  width: 100%;
+  height: 100%;
+  min-width: 0;
+  grid-template-rows: 36px minmax(0, 1fr);
+  background: var(--paper);
+}
+
+.app-frame.mobile {
+  grid-template-rows: minmax(0, 1fr);
+}
+
+.window-titlebar {
+  position: relative;
+  z-index: 30;
+  display: flex;
+  min-width: 0;
+  align-items: center;
+  justify-content: space-between;
+  color: var(--text);
+  background:
+    linear-gradient(
+      to right,
+      var(--forest-950) 0,
+      var(--forest-950) 64px,
+      var(--panel) 64px,
+      var(--panel) 100%
+    );
+  user-select: none;
+}
+
+.window-titlebar::after {
+  position: absolute;
+  right: 0;
+  bottom: 0;
+  left: 64px;
+  height: 1px;
+  background: var(--border);
+  content: '';
+  pointer-events: none;
+}
+
+.window-title {
+  display: flex;
+  min-width: 0;
+  height: 100%;
+  align-items: center;
+  gap: 7px;
+  padding-left: 21px;
+}
+
+.window-title img {
+  width: 22px;
+  height: 22px;
+  margin-right: 21px;
+  border-radius: 6px;
+}
+
+.window-title strong {
+  flex: 0 0 auto;
+  font-size: 12px;
+  font-weight: 650;
+}
+
+.window-title span {
+  overflow: hidden;
+  color: var(--text-soft);
+  font-size: 11px;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.window-controls {
+  display: flex;
+  height: 100%;
+  flex: 0 0 auto;
+}
+
+.window-controls button {
+  display: grid;
+  width: 46px;
+  height: 100%;
+  place-items: center;
+  padding: 0;
+  color: var(--text-soft);
+  background: transparent;
+}
+
+.window-controls button:hover {
+  color: var(--text);
+  background: var(--hover);
+}
+
+.window-controls .window-close:hover {
+  color: #fff;
+  background: #c42b1c;
+}
+
 .app-shell {
   position: relative;
   display: flex;
   width: 100%;
-  height: 100%;
+  min-height: 0;
   min-width: 0;
   background: var(--paper);
 }
 
-.repository-rail {
+.workspace-rail {
   z-index: 6;
   display: flex;
   flex: 0 0 64px;
@@ -34,7 +133,7 @@
   box-shadow: 0 5px 14px rgba(0, 0, 0, 0.24);
 }
 
-.repository-list {
+.workspace-list {
   display: flex;
   width: 100%;
   flex: 1;
@@ -43,7 +142,7 @@
   gap: 8px;
 }
 
-.repository-button,
+.workspace-button,
 .rail-theme-button {
   position: relative;
   display: grid;
@@ -55,7 +154,7 @@
   background: transparent;
 }
 
-.repository-button span {
+.workspace-button span {
   position: absolute;
   right: 4px;
   bottom: 2px;
@@ -63,14 +162,14 @@
   font-weight: 700;
 }
 
-.repository-button:hover,
+.workspace-button:hover,
 .rail-theme-button:hover,
-.repository-button.active {
+.workspace-button.active {
   color: white;
   background: rgba(255, 255, 255, 0.12);
 }
 
-.repository-button.active::before {
+.workspace-button.active::before {
   position: absolute;
   left: -8px;
   width: 3px;
@@ -80,7 +179,7 @@
   content: '';
 }
 
-.repository-button.subtle {
+.workspace-button.subtle {
   border: 1px dashed rgba(255, 255, 255, 0.24);
 }
 
@@ -133,7 +232,7 @@
   font-size: 11px;
 }
 
-.sidebar-add-repository {
+.sidebar-add-workspace {
   display: grid;
   width: 30px;
   height: 30px;
@@ -208,6 +307,51 @@
   text-align: left;
 }
 
+.tree-row {
+  justify-content: flex-start;
+}
+
+.tree-chevron {
+  width: 13px;
+  flex: 0 0 13px;
+  color: var(--text-soft);
+}
+
+.tree-label {
+  overflow: hidden;
+}
+
+.tree-create-actions {
+  display: flex;
+  gap: 2px;
+}
+
+.entry-context-menu {
+  position: fixed;
+  z-index: 80;
+  display: grid;
+  min-width: 168px;
+  padding: 5px;
+  border: 1px solid var(--border);
+  border-radius: 9px;
+  background: var(--surface);
+  box-shadow: var(--shadow);
+}
+
+.entry-context-menu button {
+  padding: 8px 10px;
+  border-radius: 6px;
+  text-align: left;
+}
+
+.entry-context-menu button:hover {
+  background: var(--hover);
+}
+
+.entry-context-menu button.danger {
+  color: var(--danger);
+}
+
 .worktree-row {
   min-height: 42px;
   margin: 1px 0;
@@ -232,7 +376,7 @@
 }
 
 .worktree-main > span,
-.file-row > span {
+.file-row > .tree-label {
   display: flex;
   min-width: 0;
   flex: 1;
@@ -311,6 +455,10 @@
   min-height: 37px;
   gap: 8px;
   padding: 4px 7px;
+}
+
+.file-row.tree-row {
+  padding-left: calc(5px + var(--tree-depth) * 12px);
 }
 
 .file-row > svg {

@@ -154,11 +154,11 @@ mod tests {
         .unwrap();
         let root = directory.path().to_string_lossy().into_owned();
         state
-            .record_change(
+            .record_workspace_change(
                 &root,
                 "notes/hello.md",
-                &hash_bytes(b"# Updated\n"),
-                crate::types::ManagedChangeKind::Document,
+                crate::types::WorkspaceChangeOperation::Upsert,
+                Some(&hash_bytes(b"# Updated\n")),
             )
             .unwrap();
 
@@ -188,7 +188,7 @@ mod tests {
             .push(&["refs/heads/main:refs/heads/main"], None)
             .unwrap();
 
-        let local = clone_repository(
+        let local = crate::workspace::clone_workspace(
             remote_path.to_str().unwrap(),
             sandbox.path().join("local").to_str().unwrap(),
             None,
@@ -215,7 +215,7 @@ mod tests {
         .unwrap();
         stage_paths(&local.root, &["src/code.rs".to_owned()]).unwrap();
 
-        let result = sync_marktree_changes(&local.root, None, &state).unwrap();
+        let result = sync_workspace_changes(&local.root, None, &state).unwrap();
         assert!(result.pushed);
         let local_status = repository_status(&local.root).unwrap();
         assert!(local_status
@@ -225,7 +225,7 @@ mod tests {
 
         let verification_state_dir = TempDir::new().unwrap();
         let verification_state = PersistentState::load(verification_state_dir.path()).unwrap();
-        let verification = clone_repository(
+        let verification = crate::workspace::clone_workspace(
             remote_path.to_str().unwrap(),
             sandbox.path().join("verification").to_str().unwrap(),
             None,
@@ -322,11 +322,11 @@ mod tests {
         fs::write(directory.path().join("notes/shared.md"), "# Updated\n").unwrap();
         let root = directory.path().to_string_lossy().into_owned();
         let managed = state
-            .record_change(
+            .record_workspace_change(
                 &root,
                 "notes/shared.md",
-                &hash_bytes(b"# Updated\n"),
-                crate::types::ManagedChangeKind::Document,
+                crate::types::WorkspaceChangeOperation::Upsert,
+                Some(&hash_bytes(b"# Updated\n")),
             )
             .unwrap();
         let operation_id = "commit-crash-resume";
@@ -336,7 +336,7 @@ mod tests {
             kind: GitOperationKind::Sync,
             phase: GitOperationPhase::Commit,
             started_at: Utc::now().to_rfc3339(),
-            managed_changes: vec![managed],
+            workspace_changes: vec![managed],
             changed_paths: vec!["notes/shared.md".to_owned()],
             committed: false,
             commit_id: None,
@@ -377,14 +377,14 @@ mod tests {
         let local_state = PersistentState::load(local_state_dir.path()).unwrap();
         let other_state_dir = TempDir::new().unwrap();
         let other_state = PersistentState::load(other_state_dir.path()).unwrap();
-        let local = clone_repository(
+        let local = crate::workspace::clone_workspace(
             remote_path.to_str().unwrap(),
             sandbox.path().join("local").to_str().unwrap(),
             None,
             &local_state,
         )
         .unwrap();
-        let other = clone_repository(
+        let other = crate::workspace::clone_workspace(
             remote_path.to_str().unwrap(),
             sandbox.path().join("other").to_str().unwrap(),
             None,
@@ -407,7 +407,7 @@ mod tests {
         )
         .unwrap();
         assert!(
-            sync_marktree_changes(&other.root, None, &other_state)
+            sync_workspace_changes(&other.root, None, &other_state)
                 .unwrap()
                 .pushed
         );
@@ -431,7 +431,7 @@ mod tests {
         let (remote_path, _) = seed_bare_remote(sandbox.path(), "# Shared\n");
         let app_data = TempDir::new().unwrap();
         let state = PersistentState::load(app_data.path()).unwrap();
-        let local = clone_repository(
+        let local = crate::workspace::clone_workspace(
             remote_path.to_str().unwrap(),
             sandbox.path().join("local").to_str().unwrap(),
             None,
@@ -440,18 +440,18 @@ mod tests {
         .unwrap();
         let current = fs::read(Path::new(&local.root).join("notes/shared.md")).unwrap();
         state
-            .record_change(
+            .record_workspace_change(
                 &local.root,
                 "notes/shared.md",
-                &hash_bytes(&current),
-                crate::types::ManagedChangeKind::Document,
+                crate::types::WorkspaceChangeOperation::Upsert,
+                Some(&hash_bytes(&current)),
             )
             .unwrap();
 
-        let result = sync_marktree_changes(&local.root, None, &state).unwrap();
+        let result = sync_workspace_changes(&local.root, None, &state).unwrap();
         assert!(result.pushed);
         assert!(result.changed_paths.is_empty());
-        assert!(state.managed_changes(&local.root).is_empty());
+        assert!(state.workspace_changes(&local.root).is_empty());
     }
 
     #[test]
@@ -460,7 +460,7 @@ mod tests {
         let (remote_path, _) = seed_bare_remote(sandbox.path(), "# Shared\n");
         let state_dir = TempDir::new().unwrap();
         let state = PersistentState::load(state_dir.path()).unwrap();
-        let local = clone_repository(
+        let local = crate::workspace::clone_workspace(
             remote_path.to_str().unwrap(),
             sandbox.path().join("local").to_str().unwrap(),
             None,
@@ -486,7 +486,7 @@ mod tests {
         )
         .unwrap();
 
-        let result = sync_marktree_changes(&local.root, None, &state).unwrap();
+        let result = sync_workspace_changes(&local.root, None, &state).unwrap();
 
         assert_eq!(result.failure_stage, Some(SyncStage::Prepare));
         assert_eq!(
@@ -496,7 +496,7 @@ mod tests {
         assert!(!result.committed);
         assert!(!result.pushed);
         assert!(state.pending_git_operation(&local.root).is_none());
-        assert_eq!(state.managed_changes(&local.root).len(), 1);
+        assert_eq!(state.workspace_changes(&local.root).len(), 1);
         assert_eq!(
             Repository::open(&local.root)
                 .unwrap()
@@ -519,7 +519,8 @@ mod tests {
         let state_dir = TempDir::new().unwrap();
         let state = PersistentState::load(state_dir.path()).unwrap();
         let local_path = sandbox.path().join("local");
-        let descriptor = initialize_repository(local_path.to_str().unwrap(), &state).unwrap();
+        crate::workspace::create_workspace(local_path.to_str().unwrap(), &state).unwrap();
+        let descriptor = crate::workspace::enable_git(local_path.to_str().unwrap()).unwrap();
         let repo = Repository::open(&descriptor.root).unwrap();
         repo.remote("origin", remote_path.to_str().unwrap())
             .unwrap();
@@ -541,7 +542,7 @@ mod tests {
         let plan = sync_plan(&descriptor.root, &state).unwrap();
         assert_eq!(plan.branch.as_deref(), Some("main"));
         assert!(plan.can_push);
-        let result = sync_marktree_changes(&descriptor.root, None, &state).unwrap();
+        let result = sync_workspace_changes(&descriptor.root, None, &state).unwrap();
         assert!(result.committed);
         assert!(result.pushed);
         assert_eq!(
@@ -554,7 +555,7 @@ mod tests {
 
         let verification_state_dir = TempDir::new().unwrap();
         let verification_state = PersistentState::load(verification_state_dir.path()).unwrap();
-        let verification = clone_repository(
+        let verification = crate::workspace::clone_workspace(
             remote_path.to_str().unwrap(),
             sandbox
                 .path()
@@ -581,7 +582,7 @@ mod tests {
         let state = PersistentState::load(app_data.path()).unwrap();
         let (remote_path, _) = seed_bare_remote(sandbox.path(), "# Shared\n");
         let first_path = sandbox.path().join("first");
-        let first = clone_repository(
+        let first = crate::workspace::clone_workspace(
             remote_path.to_str().unwrap(),
             first_path.to_str().unwrap(),
             None,
@@ -613,7 +614,7 @@ mod tests {
         )
         .unwrap();
 
-        let result = sync_marktree_changes(&first.root, None, &state).unwrap();
+        let result = sync_workspace_changes(&first.root, None, &state).unwrap();
         assert!(result.committed);
         assert!(result.pushed);
         assert!(result.conflicts.is_empty());
@@ -621,7 +622,7 @@ mod tests {
         let second_state_dir = TempDir::new().unwrap();
         let second_state = PersistentState::load(second_state_dir.path()).unwrap();
         let second_path = sandbox.path().join("second");
-        let second = clone_repository(
+        let second = crate::workspace::clone_workspace(
             remote_path.to_str().unwrap(),
             second_path.to_str().unwrap(),
             None,
@@ -633,6 +634,74 @@ mod tests {
         assert_eq!(
             fs::read(Path::new(&second.root).join(asset.path)).unwrap(),
             image_bytes
+        );
+    }
+
+    #[test]
+    fn workspace_move_reaches_remote_as_exact_delete_and_upsert() {
+        let sandbox = TempDir::new().unwrap();
+        let state_dir = TempDir::new().unwrap();
+        let state = PersistentState::load(state_dir.path()).unwrap();
+        let (remote_path, _) = seed_bare_remote(sandbox.path(), "# Shared\n");
+        let first = crate::workspace::clone_workspace(
+            remote_path.to_str().unwrap(),
+            sandbox.path().join("first-move").to_str().unwrap(),
+            None,
+            &state,
+        )
+        .unwrap();
+
+        let moved = crate::documents::move_entry(
+            &first.root,
+            "notes/shared.md",
+            "archive/shared.md",
+            &state,
+        )
+        .unwrap();
+        assert_eq!(moved.moved_files.len(), 1);
+        assert_eq!(moved.moved_files[0].old_path, "notes/shared.md");
+        assert_eq!(moved.moved_files[0].new_path, "archive/shared.md");
+        let changes = state.workspace_changes(&first.root);
+        assert!(changes.iter().any(|change| {
+            change.path == "notes/shared.md"
+                && change.operation == crate::types::WorkspaceChangeOperation::Delete
+        }));
+        assert!(changes.iter().any(|change| {
+            change.path == "archive/shared.md"
+                && change.operation == crate::types::WorkspaceChangeOperation::Upsert
+        }));
+
+        let result = sync_workspace_changes(&first.root, None, &state).unwrap();
+        assert!(result.committed);
+        assert!(result.pushed);
+        assert!(state.workspace_changes(&first.root).is_empty());
+        let local_repository = Repository::open(&first.root).unwrap();
+        let local_tree = local_repository
+            .head()
+            .unwrap()
+            .peel_to_commit()
+            .unwrap()
+            .tree()
+            .unwrap();
+        assert!(local_tree.get_path(Path::new("notes/shared.md")).is_err());
+        assert!(local_tree.get_path(Path::new("archive/shared.md")).is_ok());
+
+        let verification_state_dir = TempDir::new().unwrap();
+        let verification_state = PersistentState::load(verification_state_dir.path()).unwrap();
+        let second = crate::workspace::clone_workspace(
+            remote_path.to_str().unwrap(),
+            sandbox.path().join("second-move").to_str().unwrap(),
+            None,
+            &verification_state,
+        )
+        .unwrap();
+        assert!(!Path::new(&second.root).join("notes/shared.md").exists());
+        assert_eq!(
+            crate::documents::read_document(&second.root, "archive/shared.md")
+                .unwrap()
+                .content
+                .replace("\r\n", "\n"),
+            "# Shared\n"
         );
     }
 
@@ -723,14 +792,14 @@ mod tests {
         let local_state = PersistentState::load(local_state_dir.path()).unwrap();
         let remote_state_dir = TempDir::new().unwrap();
         let remote_state = PersistentState::load(remote_state_dir.path()).unwrap();
-        let local = clone_repository(
+        let local = crate::workspace::clone_workspace(
             remote_path.to_str().unwrap(),
             sandbox.path().join("local").to_str().unwrap(),
             None,
             &local_state,
         )
         .unwrap();
-        let other = clone_repository(
+        let other = crate::workspace::clone_workspace(
             remote_path.to_str().unwrap(),
             sandbox.path().join("other").to_str().unwrap(),
             None,
@@ -766,10 +835,10 @@ mod tests {
             &remote_state,
         )
         .unwrap();
-        let remote_result = sync_marktree_changes(&other.root, None, &remote_state).unwrap();
+        let remote_result = sync_workspace_changes(&other.root, None, &remote_state).unwrap();
         assert!(remote_result.pushed);
 
-        let local_result = sync_marktree_changes(&local.root, None, &local_state).unwrap();
+        let local_result = sync_workspace_changes(&local.root, None, &local_state).unwrap();
         assert_eq!(local_result.conflicts.len(), 1);
         let conflict = &local_result.conflicts[0];
         assert!(conflict
@@ -808,7 +877,7 @@ mod tests {
 
         let verification_state_dir = TempDir::new().unwrap();
         let verification_state = PersistentState::load(verification_state_dir.path()).unwrap();
-        let verification = clone_repository(
+        let verification = crate::workspace::clone_workspace(
             remote_path.to_str().unwrap(),
             sandbox.path().join("verification").to_str().unwrap(),
             None,
@@ -831,14 +900,14 @@ mod tests {
         let local_state = PersistentState::load(local_state_dir.path()).unwrap();
         let other_state_dir = TempDir::new().unwrap();
         let other_state = PersistentState::load(other_state_dir.path()).unwrap();
-        let local = clone_repository(
+        let local = crate::workspace::clone_workspace(
             remote_path.to_str().unwrap(),
             sandbox.path().join("local").to_str().unwrap(),
             None,
             &local_state,
         )
         .unwrap();
-        let other = clone_repository(
+        let other = crate::workspace::clone_workspace(
             remote_path.to_str().unwrap(),
             sandbox.path().join("other").to_str().unwrap(),
             None,
@@ -880,12 +949,12 @@ mod tests {
         )
         .unwrap();
         assert!(
-            sync_marktree_changes(&other.root, None, &other_state)
+            sync_workspace_changes(&other.root, None, &other_state)
                 .unwrap()
                 .pushed
         );
 
-        let result = sync_marktree_changes(&local.root, None, &local_state).unwrap();
+        let result = sync_workspace_changes(&local.root, None, &local_state).unwrap();
         let conflict = result.conflicts.first().unwrap();
         let operation = local_state.pending_git_operation(&local.root).unwrap();
         assert!(operation.stash_oid.is_some());
@@ -899,7 +968,7 @@ mod tests {
 
         assert_eq!(status.conflicted_count, 0);
         assert!(local_state.pending_git_operation(&local.root).is_none());
-        assert_eq!(local_state.managed_changes(&local.root).len(), 1);
+        assert_eq!(local_state.workspace_changes(&local.root).len(), 1);
         assert_eq!(
             crate::documents::read_document(&local.root, "notes/shared.md")
                 .unwrap()
@@ -921,7 +990,7 @@ mod tests {
 
         let verification_state_dir = TempDir::new().unwrap();
         let verification_state = PersistentState::load(verification_state_dir.path()).unwrap();
-        let verification = clone_repository(
+        let verification = crate::workspace::clone_workspace(
             remote_path.to_str().unwrap(),
             sandbox.path().join("abort-verification").to_str().unwrap(),
             None,
@@ -952,14 +1021,14 @@ mod tests {
         let local_state = PersistentState::load(local_state_dir.path()).unwrap();
         let other_state_dir = TempDir::new().unwrap();
         let other_state = PersistentState::load(other_state_dir.path()).unwrap();
-        let local = clone_repository(
+        let local = crate::workspace::clone_workspace(
             remote_path.to_str().unwrap(),
             sandbox.path().join("local").to_str().unwrap(),
             None,
             &local_state,
         )
         .unwrap();
-        let other = clone_repository(
+        let other = crate::workspace::clone_workspace(
             remote_path.to_str().unwrap(),
             sandbox.path().join("other").to_str().unwrap(),
             None,
@@ -973,11 +1042,11 @@ mod tests {
         )
         .unwrap();
         local_state
-            .record_change(
+            .record_workspace_change(
                 &local.root,
                 "assets/shared.png",
-                &hash_bytes(local_bytes),
-                crate::types::ManagedChangeKind::Asset,
+                crate::types::WorkspaceChangeOperation::Upsert,
+                Some(&hash_bytes(local_bytes)),
             )
             .unwrap();
         let remote_bytes = b"\0remote\xfe";
@@ -987,20 +1056,20 @@ mod tests {
         )
         .unwrap();
         other_state
-            .record_change(
+            .record_workspace_change(
                 &other.root,
                 "assets/shared.png",
-                &hash_bytes(remote_bytes),
-                crate::types::ManagedChangeKind::Asset,
+                crate::types::WorkspaceChangeOperation::Upsert,
+                Some(&hash_bytes(remote_bytes)),
             )
             .unwrap();
         assert!(
-            sync_marktree_changes(&other.root, None, &other_state)
+            sync_workspace_changes(&other.root, None, &other_state)
                 .unwrap()
                 .pushed
         );
 
-        let result = sync_marktree_changes(&local.root, None, &local_state).unwrap();
+        let result = sync_workspace_changes(&local.root, None, &local_state).unwrap();
         let conflict = result.conflicts.first().unwrap();
         assert_eq!(conflict.kind, ConflictKind::Binary);
         assert!(conflict.local.is_none());
@@ -1028,7 +1097,7 @@ mod tests {
 
         let verification_state_dir = TempDir::new().unwrap();
         let verification_state = PersistentState::load(verification_state_dir.path()).unwrap();
-        let verification = clone_repository(
+        let verification = crate::workspace::clone_workspace(
             remote_path.to_str().unwrap(),
             sandbox.path().join("binary-verification").to_str().unwrap(),
             None,
@@ -1049,14 +1118,14 @@ mod tests {
         let local_state = PersistentState::load(local_state_dir.path()).unwrap();
         let other_state_dir = TempDir::new().unwrap();
         let other_state = PersistentState::load(other_state_dir.path()).unwrap();
-        let local = clone_repository(
+        let local = crate::workspace::clone_workspace(
             remote_path.to_str().unwrap(),
             sandbox.path().join("local").to_str().unwrap(),
             None,
             &local_state,
         )
         .unwrap();
-        let other = clone_repository(
+        let other = crate::workspace::clone_workspace(
             remote_path.to_str().unwrap(),
             sandbox.path().join("other").to_str().unwrap(),
             None,
@@ -1080,7 +1149,7 @@ mod tests {
         commit_deletion(&other_repo, "notes/shared.md", "delete shared note");
         push_current_branch(&other_repo, None).unwrap();
 
-        let result = sync_marktree_changes(&local.root, None, &local_state).unwrap();
+        let result = sync_workspace_changes(&local.root, None, &local_state).unwrap();
         let conflict = result.conflicts.first().unwrap();
         assert_eq!(conflict.kind, ConflictKind::DeleteModify);
         assert!(conflict.local_exists);
@@ -1103,7 +1172,7 @@ mod tests {
 
         let verification_state_dir = TempDir::new().unwrap();
         let verification_state = PersistentState::load(verification_state_dir.path()).unwrap();
-        let verification = clone_repository(
+        let verification = crate::workspace::clone_workspace(
             remote_path.to_str().unwrap(),
             sandbox
                 .path()
@@ -1127,14 +1196,14 @@ mod tests {
         let local_state = PersistentState::load(local_state_dir.path()).unwrap();
         let other_state_dir = TempDir::new().unwrap();
         let other_state = PersistentState::load(other_state_dir.path()).unwrap();
-        let local = clone_repository(
+        let local = crate::workspace::clone_workspace(
             remote_path.to_str().unwrap(),
             sandbox.path().join("local").to_str().unwrap(),
             None,
             &local_state,
         )
         .unwrap();
-        let other = clone_repository(
+        let other = crate::workspace::clone_workspace(
             remote_path.to_str().unwrap(),
             sandbox.path().join("other").to_str().unwrap(),
             None,
@@ -1155,11 +1224,11 @@ mod tests {
         );
         push_current_branch(&Repository::open(&other.root).unwrap(), None).unwrap();
         local_state
-            .record_change(
+            .record_workspace_change(
                 &local.root,
                 "draft.md",
-                "newer-save",
-                crate::types::ManagedChangeKind::Document,
+                crate::types::WorkspaceChangeOperation::Upsert,
+                Some("newer-save"),
             )
             .unwrap();
 
@@ -1180,11 +1249,11 @@ mod tests {
         let resumed = resume_git_operation(&local.root, None, &local_state).unwrap();
         assert!(resumed.pulled);
         assert!(!resumed.pushed);
-        assert_eq!(local_state.managed_changes(&local.root).len(), 1);
+        assert_eq!(local_state.workspace_changes(&local.root).len(), 1);
 
         let verification_state_dir = TempDir::new().unwrap();
         let verification_state = PersistentState::load(verification_state_dir.path()).unwrap();
-        let verification = clone_repository(
+        let verification = crate::workspace::clone_workspace(
             remote_path.to_str().unwrap(),
             sandbox.path().join("pull-verification").to_str().unwrap(),
             None,
@@ -1205,7 +1274,7 @@ mod tests {
         let (remote_path, _) = seed_bare_remote(sandbox.path(), "# Shared\n");
         let state_dir = TempDir::new().unwrap();
         let state = PersistentState::load(state_dir.path()).unwrap();
-        let local = clone_repository(
+        let local = crate::workspace::clone_workspace(
             remote_path.to_str().unwrap(),
             sandbox.path().join("local").to_str().unwrap(),
             None,
@@ -1237,7 +1306,7 @@ mod tests {
         fs::write(Path::new(&local.root).join("scratch.txt"), "keep visible").unwrap();
 
         assert!(
-            sync_marktree_changes(&local.root, None, &state)
+            sync_workspace_changes(&local.root, None, &state)
                 .unwrap()
                 .pushed
         );
@@ -1277,7 +1346,7 @@ mod tests {
             kind: GitOperationKind::Pull,
             phase: GitOperationPhase::RestoreWorkingTree,
             started_at: Utc::now().to_rfc3339(),
-            managed_changes: Vec::new(),
+            workspace_changes: Vec::new(),
             changed_paths: Vec::new(),
             committed: false,
             commit_id: None,
@@ -1335,7 +1404,7 @@ mod tests {
             kind: GitOperationKind::Pull,
             phase: GitOperationPhase::RestoreWorkingTree,
             started_at: Utc::now().to_rfc3339(),
-            managed_changes: Vec::new(),
+            workspace_changes: Vec::new(),
             changed_paths: Vec::new(),
             committed: false,
             commit_id: None,
@@ -1383,7 +1452,7 @@ mod tests {
             kind: GitOperationKind::Pull,
             phase: GitOperationPhase::RestoreWorkingTree,
             started_at: Utc::now().to_rfc3339(),
-            managed_changes: Vec::new(),
+            workspace_changes: Vec::new(),
             changed_paths: Vec::new(),
             committed: false,
             commit_id: None,
@@ -1442,7 +1511,7 @@ mod tests {
             kind: GitOperationKind::Pull,
             phase: GitOperationPhase::Rebase,
             started_at: Utc::now().to_rfc3339(),
-            managed_changes: Vec::new(),
+            workspace_changes: Vec::new(),
             changed_paths: Vec::new(),
             committed: false,
             commit_id: None,

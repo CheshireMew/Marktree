@@ -25,13 +25,6 @@ pub fn supported_image_extension(path: &Path) -> Option<String> {
         .then_some(extension)
 }
 
-pub fn is_marktree_managed_path(path: &str) -> bool {
-    matches!(
-        document_kind(Path::new(path)),
-        DocumentKind::Markdown | DocumentKind::Image
-    ) || path == ".marktree/config.json"
-}
-
 fn normalized_extension(path: &Path) -> Option<String> {
     path.extension()
         .map(|value| value.to_string_lossy().to_ascii_lowercase())
@@ -42,7 +35,7 @@ mod tests {
     use super::*;
 
     #[test]
-    fn one_policy_classifies_documents_and_sync_paths() {
+    fn one_policy_classifies_workspace_files() {
         assert_eq!(
             document_kind(Path::new("notes/day.MD")),
             DocumentKind::Markdown
@@ -53,9 +46,5 @@ mod tests {
         );
         assert_eq!(document_kind(Path::new("data.json")), DocumentKind::Text);
         assert_eq!(document_kind(Path::new("archive.bin")), DocumentKind::Other);
-        assert!(is_marktree_managed_path("notes/day.md"));
-        assert!(is_marktree_managed_path("assets/photo.webp"));
-        assert!(is_marktree_managed_path(".marktree/config.json"));
-        assert!(!is_marktree_managed_path("src/main.rs"));
     }
 }

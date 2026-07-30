@@ -4,10 +4,10 @@ export type AppModal =
   | 'clone'
   | 'document'
   | 'worktree'
-  | 'credentials'
-  | 'mobileRepository'
+  | 'settings'
+  | 'mobileWorkspace'
 
-export interface RepositoryDialogForm {
+export interface WorkspaceDialogForm {
   remoteUrl: string
   destination: string
   documentPath: string
@@ -19,12 +19,12 @@ export interface RepositoryDialogForm {
   credentialToken: string
   assetsDir: string
   ignoreRules: string
-  repositoryName: string
+  workspaceName: string
 }
 
 export function useDialogState() {
   const modal = ref<AppModal>()
-  const form = reactive<RepositoryDialogForm>({
+  const form = reactive<WorkspaceDialogForm>({
     remoteUrl: '',
     destination: '',
     documentPath: '',
@@ -36,7 +36,7 @@ export function useDialogState() {
     credentialToken: '',
     assetsDir: 'assets',
     ignoreRules: '',
-    repositoryName: '',
+    workspaceName: '',
   })
   return { modal, form }
 }

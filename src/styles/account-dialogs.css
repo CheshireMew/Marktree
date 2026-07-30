@@ -161,8 +161,42 @@
   margin: 16px -18px 0;
 }
 
-.repository-config-form {
+.workspace-config-form {
   margin-top: 0;
+}
+
+.workspace-trash {
+  display: grid;
+  gap: 7px;
+  padding: 14px 0;
+  border-top: 1px solid var(--border);
+}
+
+.workspace-trash > header,
+.trash-row,
+.trash-row > span {
+  display: flex;
+  align-items: center;
+}
+
+.workspace-trash > header,
+.trash-row {
+  justify-content: space-between;
+  gap: 12px;
+}
+
+.trash-row > span {
+  min-width: 0;
+  flex-direction: column;
+  align-items: flex-start;
+}
+
+.trash-row small {
+  overflow: hidden;
+  max-width: 280px;
+  color: var(--text-soft);
+  text-overflow: ellipsis;
+  white-space: nowrap;
 }
 
 .comparison-grid {

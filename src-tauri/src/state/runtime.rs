@@ -3,22 +3,22 @@ use std::{collections::HashMap, sync::Arc};
 use parking_lot::Mutex;
 
 #[derive(Default)]
-pub struct RepositoryRuntime {
+pub struct WorkspaceRuntime {
     watchers: Mutex<HashMap<String, notify::RecommendedWatcher>>,
-    repository_locks: Mutex<HashMap<String, Arc<Mutex<()>>>>,
+    workspace_locks: Mutex<HashMap<String, Arc<Mutex<()>>>>,
     search_generations: Mutex<HashMap<String, u64>>,
 }
 
-impl RepositoryRuntime {
-    pub fn forget_worktrees(&self, worktree_roots: &[String]) {
+impl WorkspaceRuntime {
+    pub fn forget_roots(&self, roots: &[String]) {
         {
             let mut watchers = self.watchers.lock();
-            for root in worktree_roots {
+            for root in roots {
                 watchers.remove(root);
             }
         }
         let mut searches = self.search_generations.lock();
-        for root in worktree_roots {
+        for root in roots {
             searches.remove(root);
         }
     }
@@ -31,8 +31,8 @@ impl RepositoryRuntime {
         self.watchers.lock().insert(root.to_owned(), watcher);
     }
 
-    pub fn repository_mutex(&self, key: &str) -> Arc<Mutex<()>> {
-        self.repository_locks
+    pub fn workspace_mutex(&self, key: &str) -> Arc<Mutex<()>> {
+        self.workspace_locks
             .lock()
             .entry(key.to_owned())
             .or_insert_with(|| Arc::new(Mutex::new(())))

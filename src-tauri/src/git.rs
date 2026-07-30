@@ -12,13 +12,14 @@ pub use changes::{
 };
 pub use conflicts::{pending_conflicts, resolve_conflict, resolve_conflict_with_content};
 pub use repository::{
-    clone_repository, initialize_repository, open_repository, refresh_repository,
-    repository_lock_key, repository_status,
+    clone_repository, git_capability, has_git_capability, initialize_repository,
+    refresh_repository, repository_lock_key, repository_status,
 };
 pub use sync::{
-    abort_git_operation, pending_git_operation, pull_rebase, resume_git_operation,
-    sync_marktree_changes, sync_plan,
+    abort_git_operation, pending_git_operation, pull_rebase, resume_git_operation, sync_plan,
+    sync_workspace_changes,
 };
+pub use sync_commit::commit_workspace_baseline;
 pub use worktrees::{
     checkout_branch, create_branch, create_worktree, delete_branch, list_branches, search_worktrees,
 };

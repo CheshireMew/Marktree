@@ -4,10 +4,16 @@ use serde::{Deserialize, Serialize};
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
-pub struct RepositoryDescriptor {
+pub struct WorkspaceDescriptor {
     pub id: String,
     pub name: String,
     pub root: String,
+    pub git: Option<GitCapability>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct GitCapability {
     pub common_dir: String,
     pub remote_url: Option<String>,
     pub worktrees: Vec<WorktreeDescriptor>,
@@ -74,15 +80,22 @@ pub struct GitFileStatus {
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
-pub struct DocumentDescriptor {
+pub struct WorkspaceEntry {
     pub path: String,
     pub name: String,
-    pub extension: String,
+    pub entry_type: WorkspaceEntryType,
+    pub file_kind: Option<DocumentKind>,
     pub size: u64,
     pub modified_ms: u64,
     pub read_only: bool,
-    pub kind: DocumentKind,
     pub git_status: Option<GitFileStatus>,
+}
+
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub enum WorkspaceEntryType {
+    Directory,
+    File,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -126,7 +139,7 @@ pub struct DocumentContent {
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
-pub struct RepositoryConfig {
+pub struct WorkspaceConfig {
     #[serde(default = "default_assets_dir")]
     pub assets_dir: String,
     #[serde(default)]
@@ -135,22 +148,22 @@ pub struct RepositoryConfig {
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
-pub struct RepositoryConfigSnapshot {
-    pub config: RepositoryConfig,
+pub struct WorkspaceConfigSnapshot {
+    pub config: WorkspaceConfig,
     pub sha256: Option<String>,
     pub missing: bool,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
-pub struct SaveRepositoryConfigRequest {
+pub struct SaveWorkspaceConfigRequest {
     pub root: String,
-    pub config: RepositoryConfig,
+    pub config: WorkspaceConfig,
     pub expected_sha256: Option<String>,
     pub expected_missing: bool,
 }
 
-impl Default for RepositoryConfig {
+impl Default for WorkspaceConfig {
     fn default() -> Self {
         Self {
             assets_dir: default_assets_dir(),
@@ -332,19 +345,18 @@ pub struct SyncPlan {
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
-pub enum ManagedChangeKind {
-    Document,
-    Asset,
-    RepositoryConfig,
+pub enum WorkspaceChangeOperation {
+    Upsert,
+    Delete,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
-pub struct ManagedChange {
+pub struct WorkspaceChange {
     pub path: String,
-    pub sha256: String,
     pub generation: u64,
-    pub kind: ManagedChangeKind,
+    pub operation: WorkspaceChangeOperation,
+    pub version: Option<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -355,7 +367,7 @@ pub struct PendingGitOperation {
     pub kind: GitOperationKind,
     pub phase: GitOperationPhase,
     pub started_at: String,
-    pub managed_changes: Vec<ManagedChange>,
+    pub workspace_changes: Vec<WorkspaceChange>,
     pub changed_paths: Vec<String>,
     pub committed: bool,
     pub commit_id: Option<String>,
@@ -459,8 +471,8 @@ pub struct GithubDeviceToken {
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct LocalStateSnapshot {
-    pub repositories: Vec<String>,
-    pub managed_changes: BTreeMap<String, Vec<ManagedChange>>,
+    pub workspaces: Vec<String>,
+    pub workspace_changes: BTreeMap<String, Vec<WorkspaceChange>>,
     pub pending_git_operations: BTreeMap<String, PendingGitOperation>,
     pub recent_files: Vec<String>,
     pub credential_refs: BTreeMap<String, String>,
@@ -468,20 +480,62 @@ pub struct LocalStateSnapshot {
 
 #[derive(Debug, Clone, Serialize)]
 #[serde(rename_all = "camelCase")]
-pub struct RepositoryChangedEvent {
+pub struct WorkspaceChangedEvent {
     pub root: String,
 }
 
 #[derive(Debug, Clone, Serialize)]
 #[serde(rename_all = "camelCase")]
-pub struct RepositoryWatchErrorEvent {
+pub struct WorkspaceWatchErrorEvent {
     pub root: String,
     pub message: String,
 }
 
 #[derive(Debug, Clone, Serialize)]
 #[serde(rename_all = "camelCase")]
-pub struct RepositoryForgottenEvent {
-    pub repository_id: String,
-    pub worktree_roots: Vec<String>,
+pub struct WorkspaceForgottenEvent {
+    pub workspace_id: String,
+    pub roots: Vec<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct GitBaselinePreview {
+    pub file_count: usize,
+    pub total_bytes: u64,
+    pub ignored_count: usize,
+    pub ignore_rules: Vec<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct MoveWorkspaceEntryRequest {
+    pub root: String,
+    pub source_path: String,
+    pub destination_path: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct WorkspaceEntryMoveResult {
+    pub old_path: String,
+    pub new_path: String,
+    pub moved_files: Vec<WorkspacePathMove>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct WorkspacePathMove {
+    pub old_path: String,
+    pub new_path: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct TrashEntry {
+    pub id: String,
+    pub workspace_root: String,
+    pub original_path: String,
+    pub name: String,
+    pub deleted_at: String,
 }

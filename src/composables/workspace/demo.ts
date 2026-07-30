@@ -1,18 +1,18 @@
 import { reactive } from 'vue'
 
-import type { GitStatusSnapshot, RepositoryDescriptor } from '@/types'
+import type { GitStatusSnapshot, WorkspaceDescriptor } from '@/types'
 
 import {
-  activeRepositoryId,
+  activeWorkspaceId,
   activeWorktreePath,
   ensureSession,
   fileName,
-  repositories,
+  workspaces,
 } from './state'
 import { openDocument } from './documents'
 import { demoContents } from './demoData'
 
-export function loadDemoWorkspace() {
+export function loadDemoWorkspace(withGit: boolean) {
   const clean: GitStatusSnapshot = {
     branch: 'main',
     upstream: 'origin/main',
@@ -41,65 +41,95 @@ export function loadDemoWorkspace() {
       },
     ],
   }
-  const repository = reactive<RepositoryDescriptor>({
+  const workspace = reactive<WorkspaceDescriptor>({
     id: 'marktree-demo',
     name: 'Marktree',
     root: 'E:\\Writing\\Marktree',
-    commonDir: 'E:\\Writing\\Marktree\\.git',
-    remoteUrl: 'https://github.com/example/marktree-notes',
-    status: clean,
-    worktrees: [
-      {
-        name: 'main',
-        path: 'E:\\Writing\\Marktree',
-        branch: 'main',
-        isMain: true,
-        isLocked: false,
-        isDetached: false,
-        status: clean,
-      },
-      {
-        name: 'book',
-        path: 'E:\\Writing\\Marktree-book',
-        branch: 'book',
-        isMain: false,
-        isLocked: false,
-        isDetached: false,
-        status: { ...clean, changedCount: 0, files: [] },
-      },
-    ],
+    git: withGit
+      ? {
+          commonDir: 'E:\\Writing\\Marktree\\.git',
+          remoteUrl: 'https://github.com/example/marktree-notes',
+          status: clean,
+          worktrees: [
+            {
+              name: 'main',
+              path: 'E:\\Writing\\Marktree',
+              branch: 'main',
+              isMain: true,
+              isLocked: false,
+              isDetached: false,
+              status: clean,
+            },
+            {
+              name: 'book',
+              path: 'E:\\Writing\\Marktree-book',
+              branch: 'book',
+              isMain: false,
+              isLocked: false,
+              isDetached: false,
+              status: { ...clean, changedCount: 0, files: [] },
+            },
+          ],
+        }
+      : null,
   })
-  repositories.value = [repository]
-  activeRepositoryId.value = repository.id
-  activeWorktreePath.value = repository.root
-  const session = ensureSession(repository.root)
-  session.branches = [
+  workspaces.value = [workspace]
+  activeWorkspaceId.value = workspace.id
+  activeWorktreePath.value = workspace.root
+  const session = ensureSession(workspace.root)
+  session.branches = withGit
+    ? [
+        {
+          name: 'main',
+          isCurrent: true,
+          upstream: 'origin/main',
+          ahead: 1,
+          behind: 0,
+          checkedOutPath: workspace.root,
+        },
+        {
+          name: 'book',
+          isCurrent: false,
+          upstream: null,
+          ahead: 0,
+          behind: 0,
+          checkedOutPath: 'E:\\Writing\\Marktree-book',
+        },
+      ]
+    : []
+  session.entries = [
     {
-      name: 'main',
-      isCurrent: true,
-      upstream: 'origin/main',
-      ahead: 1,
-      behind: 0,
-      checkedOutPath: repository.root,
+      path: 'notes',
+      name: 'notes',
+      entryType: 'directory' as const,
+      fileKind: null,
+      size: 0,
+      modifiedMs: Date.now(),
+      readOnly: true,
+      gitStatus: null,
     },
     {
-      name: 'book',
-      isCurrent: false,
-      upstream: null,
-      ahead: 0,
-      behind: 0,
-      checkedOutPath: 'E:\\Writing\\Marktree-book',
+      path: 'docs',
+      name: 'docs',
+      entryType: 'directory' as const,
+      fileKind: null,
+      size: 0,
+      modifiedMs: Date.now(),
+      readOnly: true,
+      gitStatus: null,
     },
+    ...Object.keys(demoContents).map((path) => ({
+      path,
+      name: fileName(path),
+      entryType: 'file' as const,
+      fileKind: 'markdown' as const,
+      size: demoContents[path]?.length ?? 0,
+      modifiedMs: Date.now(),
+      readOnly: false,
+      gitStatus: withGit
+        ? (clean.files.find((file) => file.path === path) ?? null)
+        : null,
+    })),
   ]
-  session.documents = Object.keys(demoContents).map((path) => ({
-    path,
-    name: fileName(path),
-    extension: 'md',
-    size: demoContents[path]?.length ?? 0,
-    modifiedMs: Date.now(),
-    readOnly: false,
-    kind: 'markdown',
-    gitStatus: clean.files.find((file) => file.path === path) ?? null,
-  }))
   void openDocument('README.md')
 }

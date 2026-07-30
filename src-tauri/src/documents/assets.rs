@@ -5,17 +5,18 @@ use std::{
 
 use base64::{engine::general_purpose::STANDARD, Engine};
 
-use super::config::read_repository_config;
+use super::config::read_workspace_config;
 use crate::{
     content_policy::{document_kind, supported_image_extension},
     error::{AppError, AppResult},
     file_version::hash_bytes,
+    git,
     paths::{
         atomic_write, canonical_root, normalize_relative, path_to_slashes, resolve_existing_file,
         resolve_for_write,
     },
     state::PersistentState,
-    types::{AssetPreview, AssetWriteResult, DocumentKind, ManagedChangeKind},
+    types::{AssetPreview, AssetWriteResult, DocumentKind, WorkspaceChangeOperation},
 };
 
 const MAX_ASSET_BYTES: u64 = 64 * 1024 * 1024;
@@ -74,7 +75,7 @@ pub fn write_asset(
     let selected_assets_dir = if let Some(assets_dir) = assets_dir {
         assets_dir
     } else {
-        configured_assets_dir = read_repository_config(root)?.config.assets_dir;
+        configured_assets_dir = read_workspace_config(root)?.config.assets_dir;
         configured_assets_dir.as_str()
     };
     let asset_root_relative = normalize_relative(selected_assets_dir)?;
@@ -104,7 +105,14 @@ pub fn write_asset(
     if let Some(parent) = asset_path.parent() {
         fs::create_dir_all(parent)?;
     }
-    app_state.record_change(root, &relative_asset, &sha256, ManagedChangeKind::Asset)?;
+    if git::has_git_capability(root) {
+        app_state.record_workspace_change(
+            root,
+            &relative_asset,
+            WorkspaceChangeOperation::Upsert,
+            Some(&sha256),
+        )?;
+    }
     if !asset_path.exists() || fs::read(&asset_path)? != bytes {
         atomic_write(&asset_path, &bytes)?;
     }
