@@ -1,15 +1,22 @@
 <script setup lang="ts">
+import { computed, ref } from 'vue'
+
+import CredentialFields from '@/components/CredentialFields.vue'
+import WorkspaceSettingsDialog from '@/components/WorkspaceSettingsDialog.vue'
+import { useDialogAccessibility } from '@/composables/useDialogAccessibility'
 import type {
   AuthConfiguration,
   GithubDeviceCode,
+  OperationLogEntry,
   TrashEntry,
 } from '@/types'
 import type {
   AppModal,
+  ConfirmationDialogState,
   WorkspaceDialogForm,
 } from '@/composables/app/dialogState'
 
-defineProps<{
+const props = defineProps<{
   modal?: AppModal
   form: WorkspaceDialogForm
   nativeAndroid: boolean
@@ -19,48 +26,74 @@ defineProps<{
   githubPending: boolean
   cloneCredentialId?: string
   trashEntries: TrashEntry[]
+  operationLog: OperationLogEntry[]
+  busy?: boolean
+  error?: string
+  confirmation?: ConfirmationDialogState
 }>()
 
-defineEmits<{
+const emit = defineEmits<{
   close: []
   chooseCloneDestination: []
   clone: []
   beginGithubLogin: []
   createDocument: []
   createMobileWorkspace: []
+  createDesktopWorkspace: []
   createWorktree: []
+  submitEntryAction: []
   saveGenericCredential: []
   saveWorkspaceConfig: []
+  enableGit: []
   forgetActiveWorkspace: []
   restoreTrash: [id: string]
   emptyTrash: []
+  exportWorkspaceArchive: []
+  confirm: []
 }>()
+
+const dialogSurface = ref<HTMLElement>()
+useDialogAccessibility(computed(() => props.modal), dialogSurface, () => emit('close'))
 </script>
 
 <template>
-  <div v-if="modal" class="modal-backdrop" @mousedown.self="$emit('close')">
-    <form v-if="modal === 'clone'" class="dialog" @submit.prevent="$emit('clone')">
+  <div
+    v-if="modal"
+    ref="dialogSurface"
+    class="modal-backdrop"
+    @mousedown.self="$emit('close')"
+  >
+    <form
+      v-if="modal === 'clone'"
+      class="dialog"
+      role="dialog"
+      aria-modal="true"
+      aria-labelledby="workspace-dialog-title"
+      tabindex="-1"
+      @submit.prevent="$emit('clone')"
+    >
       <header>
-        <h2>{{ $t('app.clone') }}</h2>
-        <button type="button" @click="$emit('close')">×</button>
+        <h2 id="workspace-dialog-title">{{ $t('app.clone') }}</h2>
+        <button type="button" :disabled="busy" :aria-label="$t('app.close')" @click="$emit('close')">×</button>
       </header>
       <label>
         <span>{{ $t('app.httpsUrl') }}</span>
         <input
           v-model="form.remoteUrl"
           autofocus
+          :disabled="busy"
           placeholder="https://github.com/user/repository.git"
         />
       </label>
       <label v-if="nativeAndroid">
         <span>{{ $t('app.workspaceName') }}</span>
-        <input v-model="form.workspaceName" placeholder="my-notes" />
+        <input v-model="form.workspaceName" :disabled="busy" placeholder="my-notes" />
       </label>
       <label v-else>
         <span>{{ $t('app.localFolder') }}</span>
         <div class="input-action">
-          <input v-model="form.destination" placeholder="D:\Documents\notes" />
-          <button type="button" @click="$emit('chooseCloneDestination')">…</button>
+          <input v-model="form.destination" :disabled="busy" placeholder="D:\Documents\notes" />
+          <button type="button" :disabled="busy" :aria-label="$t('app.chooseFolder')" @click="$emit('chooseCloneDestination')">…</button>
         </div>
       </label>
       <section class="clone-auth">
@@ -72,7 +105,7 @@ defineEmits<{
           <button
             v-if="authConfiguration?.githubEnabled"
             type="button"
-            :disabled="githubPending"
+            :disabled="busy || githubPending"
             @click="$emit('beginGithubLogin')"
           >
             {{
@@ -88,198 +121,226 @@ defineEmits<{
           <span>{{ $t('app.githubCode') }}</span>
           <strong>{{ githubDevice.userCode }}</strong>
         </div>
-        <label>
-          <span>{{ $t('app.username') }}</span>
-          <input
-            v-model="form.credentialUsername"
-            autocomplete="username"
-            placeholder="username"
-          />
-        </label>
-        <label>
-          <span>{{ $t('app.personalAccessToken') }}</span>
-          <input
-            v-model="form.credentialToken"
-            type="password"
-            autocomplete="current-password"
-          />
-        </label>
+        <CredentialFields
+          v-model:username="form.credentialUsername"
+          v-model:token="form.credentialToken"
+          :disabled="busy"
+        />
       </section>
+      <p v-if="error" class="dialog-feedback error" role="alert">{{ error }}</p>
       <footer>
-        <button type="button" @click="$emit('close')">{{ $t('app.close') }}</button>
-        <button class="primary">{{ $t('app.clone') }}</button>
+        <button type="button" :disabled="busy" @click="$emit('close')">{{ $t('app.close') }}</button>
+        <button class="primary" :disabled="busy || !form.remoteUrl.trim() || (!nativeAndroid && !form.destination.trim())">{{ busy ? $t('app.working') : $t('app.clone') }}</button>
       </footer>
     </form>
 
     <form
       v-else-if="modal === 'document'"
       class="dialog compact-dialog"
+      role="dialog"
+      aria-modal="true"
+      aria-labelledby="workspace-dialog-title"
+      tabindex="-1"
       @submit.prevent="$emit('createDocument')"
     >
       <header>
-        <h2>{{ $t('app.newDocument') }}</h2>
-        <button type="button" @click="$emit('close')">×</button>
+        <h2 id="workspace-dialog-title">{{ $t('app.newDocument') }}</h2>
+        <button type="button" :disabled="busy" :aria-label="$t('app.close')" @click="$emit('close')">×</button>
       </header>
       <label>
         <span>{{ $t('app.path') }}</span>
         <input
           v-model="form.documentPath"
           autofocus
+          :disabled="busy"
           placeholder="notes/new-document.md"
         />
       </label>
+      <p v-if="error" class="dialog-feedback error" role="alert">{{ error }}</p>
       <footer>
-        <button type="button" @click="$emit('close')">{{ $t('app.close') }}</button>
-        <button class="primary">{{ $t('app.newDocument') }}</button>
+        <button type="button" :disabled="busy" @click="$emit('close')">{{ $t('app.close') }}</button>
+        <button class="primary" :disabled="busy || !form.documentPath.trim()">{{ busy ? $t('app.working') : $t('app.newDocument') }}</button>
       </footer>
     </form>
 
     <form
       v-else-if="modal === 'mobileWorkspace'"
       class="dialog compact-dialog"
+      role="dialog"
+      aria-modal="true"
+      aria-labelledby="workspace-dialog-title"
+      tabindex="-1"
       @submit.prevent="$emit('createMobileWorkspace')"
     >
       <header>
-        <h2>{{ $t('app.newFolder') }}</h2>
-        <button type="button" @click="$emit('close')">×</button>
+        <h2 id="workspace-dialog-title">{{ $t('app.newFolder') }}</h2>
+        <button type="button" :disabled="busy" :aria-label="$t('app.close')" @click="$emit('close')">×</button>
       </header>
       <label>
         <span>{{ $t('app.workspaceName') }}</span>
-        <input v-model="form.workspaceName" autofocus placeholder="my-notes" />
+        <input v-model="form.workspaceName" autofocus :disabled="busy" placeholder="my-notes" />
       </label>
+      <p v-if="error" class="dialog-feedback error" role="alert">{{ error }}</p>
       <footer>
-        <button type="button" @click="$emit('close')">{{ $t('app.close') }}</button>
-        <button class="primary">{{ $t('app.create') }}</button>
+        <button type="button" :disabled="busy" @click="$emit('close')">{{ $t('app.close') }}</button>
+        <button class="primary" :disabled="busy || !form.workspaceName.trim()">{{ busy ? $t('app.working') : $t('app.create') }}</button>
+      </footer>
+    </form>
+
+    <form
+      v-else-if="modal === 'desktopWorkspace'"
+      class="dialog compact-dialog"
+      role="dialog"
+      aria-modal="true"
+      aria-labelledby="workspace-dialog-title"
+      tabindex="-1"
+      @submit.prevent="$emit('createDesktopWorkspace')"
+    >
+      <header>
+        <h2 id="workspace-dialog-title">{{ $t('app.newFolder') }}</h2>
+        <button type="button" :disabled="busy" :aria-label="$t('app.close')" @click="$emit('close')">×</button>
+      </header>
+      <label>
+        <span>{{ $t('app.workspaceName') }}</span>
+        <input v-model="form.workspaceName" autofocus :disabled="busy" placeholder="my-notes" />
+      </label>
+      <p class="entry-action-summary">{{ form.destination }}</p>
+      <p v-if="error" class="dialog-feedback error" role="alert">{{ error }}</p>
+      <footer>
+        <button type="button" :disabled="busy" @click="$emit('close')">{{ $t('app.close') }}</button>
+        <button class="primary" :disabled="busy || !form.workspaceName.trim()">{{ busy ? $t('app.working') : $t('app.create') }}</button>
       </footer>
     </form>
 
     <form
       v-else-if="modal === 'worktree'"
       class="dialog"
+      role="dialog"
+      aria-modal="true"
+      aria-labelledby="workspace-dialog-title"
+      tabindex="-1"
       @submit.prevent="$emit('createWorktree')"
     >
       <header>
-        <h2>{{ $t('app.worktreeNew') }}</h2>
-        <button type="button" @click="$emit('close')">×</button>
+        <h2 id="workspace-dialog-title">{{ $t('app.worktreeNew') }}</h2>
+        <button type="button" :disabled="busy" :aria-label="$t('app.close')" @click="$emit('close')">×</button>
       </header>
       <div class="form-grid">
         <label>
           <span>{{ $t('app.fieldName') }}</span>
-          <input v-model="form.worktreeName" autofocus placeholder="book" />
+          <input v-model="form.worktreeName" autofocus :disabled="busy" placeholder="book" />
         </label>
         <label>
           <span>{{ $t('app.branch') }}</span>
-          <input v-model="form.worktreeBranch" placeholder="book" />
+          <input v-model="form.worktreeBranch" :disabled="busy" placeholder="book" />
         </label>
       </div>
       <label>
         <span>{{ $t('app.startFrom') }}</span>
-        <input v-model="form.worktreeStart" :placeholder="$t('app.headOrBranch')" />
+        <input v-model="form.worktreeStart" :disabled="busy" :placeholder="$t('app.headOrBranch')" />
       </label>
       <label>
         <span>{{ $t('app.folder') }}</span>
-        <input v-model="form.worktreePath" />
+        <input v-model="form.worktreePath" :disabled="busy" />
       </label>
+      <p v-if="error" class="dialog-feedback error" role="alert">{{ error }}</p>
       <footer>
-        <button type="button" @click="$emit('close')">{{ $t('app.close') }}</button>
-        <button class="primary">{{ $t('app.worktreeNew') }}</button>
+        <button type="button" :disabled="busy" @click="$emit('close')">{{ $t('app.close') }}</button>
+        <button class="primary" :disabled="busy || !form.worktreeName.trim() || !form.worktreePath.trim() || !form.worktreeBranch.trim()">{{ busy ? $t('app.working') : $t('app.worktreeNew') }}</button>
       </footer>
     </form>
 
-    <section v-else class="dialog credentials-dialog">
+    <form
+      v-else-if="modal === 'workspaceEntry'"
+      class="dialog compact-dialog"
+      role="dialog"
+      aria-modal="true"
+      aria-labelledby="workspace-dialog-title"
+      tabindex="-1"
+      @submit.prevent="$emit('submitEntryAction')"
+    >
       <header>
-        <div>
-          <h2>{{ $t('app.workspaceSettings') }}</h2>
-          <p>{{ $t('app.workspaceSettingsHint') }}</p>
-        </div>
-        <button type="button" @click="$emit('close')">×</button>
+        <h2 id="workspace-dialog-title">
+          {{
+            form.entryAction === 'newFolder'
+              ? $t('app.newFolder')
+              : form.entryAction === 'rename'
+                ? $t('app.rename')
+                : form.entryAction === 'duplicate'
+                  ? $t('app.createDuplicate')
+                  : $t('app.moveToTrash')
+          }}
+        </h2>
+        <button type="button" :disabled="busy" :aria-label="$t('app.close')" @click="$emit('close')">×</button>
       </header>
-      <section v-if="gitEnabled" class="github-auth">
-        <div>
-          <strong>GitHub</strong>
-          <span>{{ $t('app.authorizeDevice') }}</span>
-        </div>
+      <p v-if="form.entryAction === 'trash'" class="entry-action-summary">
+        {{ $t('app.trashEntryConfirm', { name: form.entryOriginalName }) }}
+      </p>
+      <label v-else>
+        <span>{{ form.entryAction === 'newFolder' ? $t('app.folder') : $t('app.fieldName') }}</span>
+        <input v-model="form.entryName" autofocus :disabled="busy" />
+      </label>
+      <p v-if="error" class="dialog-feedback error" role="alert">{{ error }}</p>
+      <footer>
+        <button type="button" :disabled="busy" @click="$emit('close')">{{ $t('app.close') }}</button>
         <button
-          v-if="authConfiguration?.githubEnabled"
           class="primary"
-          :disabled="githubPending"
-          @click="$emit('beginGithubLogin')"
+          :class="{ danger: form.entryAction === 'trash' }"
+          :disabled="busy || (form.entryAction !== 'trash' && (!form.entryName.trim() || (form.entryAction === 'rename' && form.entryName.trim() === form.entryOriginalName)))"
         >
-          {{ githubPending ? $t('app.waiting') : $t('app.connectGithub') }}
+          {{ busy ? $t('app.working') : form.entryAction === 'trash' ? $t('app.moveToTrash') : $t('app.confirm') }}
         </button>
-        <span v-else class="auth-unavailable">{{ $t('app.githubUnavailable') }}</span>
-      </section>
-      <div v-if="gitEnabled && githubDevice" class="device-code">
-        <span>{{ $t('app.githubCode') }}</span>
-        <strong>{{ githubDevice.userCode }}</strong>
-      </div>
-      <form v-if="gitEnabled" class="token-form" @submit.prevent="$emit('saveGenericCredential')">
-        <h3>{{ $t('app.otherHttpsRemote') }}</h3>
-        <label>
-          <span>{{ $t('app.username') }}</span>
-          <input
-            v-model="form.credentialUsername"
-            autocomplete="username"
-            placeholder="username"
-          />
-        </label>
-        <label>
-          <span>{{ $t('app.personalAccessToken') }}</span>
-          <input
-            v-model="form.credentialToken"
-            type="password"
-            autocomplete="current-password"
-          />
-        </label>
-        <footer>
-          <button class="primary">{{ $t('app.saveCredential') }}</button>
-        </footer>
-      </form>
-      <form
-        class="token-form workspace-config-form"
-        @submit.prevent="$emit('saveWorkspaceConfig')"
-      >
-        <h3>{{ $t('app.workspaceSettings') }}</h3>
-        <label>
-          <span>{{ $t('app.assetFolder') }}</span>
-          <input v-model="form.assetsDir" placeholder="assets" />
-        </label>
-        <label>
-          <span>{{ $t('app.ignoreRules') }}</span>
-          <textarea v-model="form.ignoreRules" placeholder="build/**&#10;private/**" />
-        </label>
-        <footer>
-          <button class="primary">{{ $t('app.saveSettings') }}</button>
-        </footer>
-      </form>
-      <section v-if="nativeAndroid" class="workspace-trash">
-        <header>
-          <h3>{{ $t('app.trash') }}</h3>
-          <button
-            v-if="trashEntries.length"
-            class="danger"
-            @click="$emit('emptyTrash')"
-          >
-            {{ $t('app.emptyTrash') }}
-          </button>
-        </header>
-        <p v-if="!trashEntries.length">{{ $t('app.trashEmpty') }}</p>
-        <div v-for="entry in trashEntries" :key="entry.id" class="trash-row">
-          <span>
-            <strong>{{ entry.name }}</strong>
-            <small>{{ entry.originalPath }}</small>
-          </span>
-          <button @click="$emit('restoreTrash', entry.id)">
-            {{ $t('app.restore') }}
-          </button>
-        </div>
-      </section>
-      <footer class="workspace-lifecycle">
-        <button class="danger" @click="$emit('forgetActiveWorkspace')">
-          {{ $t('app.forgetWorkspace') }}
+      </footer>
+    </form>
+
+    <section
+      v-else-if="modal === 'confirmation' && confirmation"
+      class="dialog compact-dialog confirmation-dialog"
+      role="alertdialog"
+      aria-modal="true"
+      aria-labelledby="workspace-dialog-title"
+      tabindex="-1"
+    >
+      <header>
+        <h2 id="workspace-dialog-title">{{ confirmation.title }}</h2>
+        <button type="button" :disabled="busy" :aria-label="$t('app.close')" @click="$emit('close')">×</button>
+      </header>
+      <p class="entry-action-summary">{{ confirmation.message }}</p>
+      <p v-if="error" class="dialog-feedback error" role="alert">{{ error }}</p>
+      <footer>
+        <button type="button" :disabled="busy" @click="$emit('close')">{{ $t('app.close') }}</button>
+        <button
+          class="primary"
+          :class="{ danger: confirmation.danger }"
+          :disabled="busy"
+          @click="$emit('confirm')"
+        >
+          {{ busy ? $t('app.working') : confirmation.confirmLabel }}
         </button>
-        <span>{{ $t('app.forgetWorkspaceHint') }}</span>
       </footer>
     </section>
+
+    <WorkspaceSettingsDialog
+      v-else
+      :form="form"
+      :native-android="nativeAndroid"
+      :git-enabled="gitEnabled"
+      :auth-configuration="authConfiguration"
+      :github-device="githubDevice"
+      :github-pending="githubPending"
+      :trash-entries="trashEntries"
+      :operation-log="operationLog"
+      :busy="busy"
+      :error="error"
+      @close="$emit('close')"
+      @begin-github-login="$emit('beginGithubLogin')"
+      @save-generic-credential="$emit('saveGenericCredential')"
+      @save-workspace-config="$emit('saveWorkspaceConfig')"
+      @enable-git="$emit('enableGit')"
+      @forget-active-workspace="$emit('forgetActiveWorkspace')"
+      @restore-trash="$emit('restoreTrash', $event)"
+      @empty-trash="$emit('emptyTrash')"
+      @export-workspace-archive="$emit('exportWorkspaceArchive')"
+    />
   </div>
 </template>

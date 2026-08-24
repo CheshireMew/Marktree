@@ -4,20 +4,24 @@ use crate::{
     auth,
     error::AppResult,
     git,
-    paths::paths_equal,
-    state::{PersistentState, WorkspaceRuntime},
-    types::{GitCapability, GitOperationPhase, SyncResult, SyncStage},
+    paths::{paths_equal, portable_name_fragment},
+    state::PersistentState,
+    types::{GitCapability, SyncResult, SyncStage},
 };
 
-pub(super) fn credential_for_root(
-    root: &str,
-    state: &PersistentState,
-) -> AppResult<Option<crate::types::CredentialRecord>> {
-    state
-        .credential_ref(&git::repository_lock_key(root))
-        .as_deref()
-        .map(auth::load_credential)
-        .transpose()
+pub(super) async fn run_blocking<T>(
+    operation: impl FnOnce() -> AppResult<T> + Send + 'static,
+) -> AppResult<T>
+where
+    T: Send + 'static,
+{
+    tauri::async_runtime::spawn_blocking(operation)
+        .await
+        .map_err(|error| {
+            crate::error::AppError::Message(format!(
+                "The native worker stopped before completing the operation: {error}"
+            ))
+        })?
 }
 
 pub(super) fn with_sync_credential(
@@ -25,45 +29,25 @@ pub(super) fn with_sync_credential(
     state: &PersistentState,
     operation: impl FnOnce(Option<crate::types::CredentialRecord>) -> AppResult<SyncResult>,
 ) -> AppResult<SyncResult> {
-    match credential_for_root(root, state) {
+    match auth::credential_for_workspace(root, state) {
         Ok(credential) => operation(credential),
-        Err(error) => Ok(SyncResult::failure(
-            SyncStage::Credential,
-            error,
-            state
-                .workspace_changes(root)
+        Err(error) => {
+            let changed_paths = state
+                .try_workspace_changes(root)?
                 .into_iter()
                 .map(|change| change.path)
-                .collect(),
-        )),
-    }
-}
-
-pub(super) fn ensure_writable_during_git_operation(
-    state: &PersistentState,
-    root: &str,
-) -> AppResult<()> {
-    let blocked = state.pending_git_operation(root).is_some_and(|operation| {
-        operation.aborting
-            || matches!(
-                operation.phase,
-                GitOperationPhase::Commit
-                    | GitOperationPhase::PreserveWorkingTree
-                    | GitOperationPhase::Rebase
-                    | GitOperationPhase::RestoreWorkingTree
-            )
-    });
-    if blocked {
-        Err(crate::error::AppError::GitOperationPending {
-            root: root.to_owned(),
-        })
-    } else {
-        Ok(())
+                .collect();
+            Ok(SyncResult::failure(
+                SyncStage::Credential,
+                error,
+                changed_paths,
+            ))
+        }
     }
 }
 
 pub(super) fn ensure_worktree_idle(state: &PersistentState, root: &str) -> AppResult<()> {
-    if state.pending_git_operation(root).is_some() {
+    if state.try_pending_git_operation(root)?.is_some() {
         Err(crate::error::AppError::GitOperationPending {
             root: root.to_owned(),
         })
@@ -90,7 +74,7 @@ pub(super) fn ensure_git_idle(
         if allowed_root.is_some_and(|allowed| paths_equal(allowed, &worktree.path)) {
             continue;
         }
-        if state.pending_git_operation(&worktree.path).is_some() {
+        if state.try_pending_git_operation(&worktree.path)?.is_some() {
             return Err(crate::error::AppError::GitOperationPending {
                 root: worktree.path.clone(),
             });
@@ -99,52 +83,8 @@ pub(super) fn ensure_git_idle(
     Ok(())
 }
 
-pub(super) fn with_workspace_lock<T>(
-    runtime: &WorkspaceRuntime,
-    root: &str,
-    operation: impl FnOnce() -> AppResult<T>,
-) -> AppResult<T> {
-    let key = git::repository_lock_key(root);
-    let mutex = runtime.workspace_mutex(&key);
-    let _guard = mutex.lock();
-    operation()
-}
-
-pub(super) fn with_two_workspace_locks<T>(
-    runtime: &WorkspaceRuntime,
-    left_root: &str,
-    right_root: &str,
-    operation: impl FnOnce() -> AppResult<T>,
-) -> AppResult<T> {
-    let mut keys = [
-        git::repository_lock_key(left_root),
-        git::repository_lock_key(right_root),
-    ];
-    keys.sort();
-    let first = runtime.workspace_mutex(&keys[0]);
-    let _first_guard = first.lock();
-    if keys[0] == keys[1] {
-        return operation();
-    }
-    let second = runtime.workspace_mutex(&keys[1]);
-    let _second_guard = second.lock();
-    operation()
-}
-
 pub(super) fn mobile_workspace_path(app: &AppHandle, name: &str) -> AppResult<std::path::PathBuf> {
-    let normalized = name
-        .trim()
-        .chars()
-        .map(|character| {
-            if character.is_alphanumeric() || matches!(character, '-' | '_') {
-                character
-            } else {
-                '-'
-            }
-        })
-        .collect::<String>()
-        .trim_matches('-')
-        .to_owned();
+    let normalized = portable_name_fragment(name);
     if normalized.is_empty() {
         return Err(crate::error::AppError::Message(
             "A workspace name is required.".to_owned(),
@@ -155,4 +95,19 @@ pub(super) fn mobile_workspace_path(app: &AppHandle, name: &str) -> AppResult<st
         .app_data_dir()?
         .join("workspaces")
         .join(normalized))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn blocking_native_work_runs_off_the_async_command_thread() {
+        let command_thread = std::thread::current().id();
+        let worker_thread =
+            tauri::async_runtime::block_on(run_blocking(|| Ok(std::thread::current().id())))
+                .unwrap();
+
+        assert_ne!(command_thread, worker_thread);
+    }
 }

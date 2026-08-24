@@ -3,22 +3,21 @@ use std::fs;
 use globset::{Glob, GlobSet, GlobSetBuilder};
 
 use crate::{
+    content_policy::VERSIONED_WORKSPACE_CONFIG,
     error::{AppError, AppResult},
     file_version::{hash_bytes, verify_expected_version},
-    git,
     paths::{
-        atomic_write, canonical_root, normalize_relative, resolve_existing_file, resolve_for_write,
+        atomic_write_if_version, canonical_root, normalize_content_relative, resolve_existing_file,
+        resolve_for_write,
     },
     state::PersistentState,
-    types::{
-        SaveWorkspaceConfigRequest, WorkspaceChangeOperation, WorkspaceConfig,
-        WorkspaceConfigSnapshot,
-    },
+    types::{SaveWorkspaceConfigRequest, WorkspaceConfig, WorkspaceConfigSnapshot},
+    workspace_operation::{execute_mutation, WorkspaceChangeIntent, WorkspaceOperationKind},
 };
 
 pub fn read_workspace_config(root: &str) -> AppResult<WorkspaceConfigSnapshot> {
     let root_path = canonical_root(root)?;
-    let relative = ".marktree/config.json";
+    let relative = VERSIONED_WORKSPACE_CONFIG;
     let path = resolve_for_write(&root_path, relative)?;
     if !path.exists() {
         return Ok(WorkspaceConfigSnapshot {
@@ -30,7 +29,7 @@ pub fn read_workspace_config(root: &str) -> AppResult<WorkspaceConfigSnapshot> {
     let path = resolve_existing_file(&root_path, relative)?;
     let bytes = fs::read(path)?;
     let config: WorkspaceConfig = serde_json::from_slice(&bytes)?;
-    normalize_relative(&config.assets_dir)?;
+    normalize_content_relative(&config.assets_dir)?;
     build_ignore_set(&config.ignore_rules)?;
     Ok(WorkspaceConfigSnapshot {
         config,
@@ -44,7 +43,7 @@ pub fn save_workspace_config(
     app_state: &PersistentState,
 ) -> AppResult<WorkspaceConfigSnapshot> {
     let root_path = canonical_root(&request.root)?;
-    let assets_dir = normalize_relative(&request.config.assets_dir)?;
+    let assets_dir = normalize_content_relative(&request.config.assets_dir)?;
     build_ignore_set(&request.config.ignore_rules)?;
     let normalized = WorkspaceConfig {
         assets_dir,
@@ -56,7 +55,7 @@ pub fn save_workspace_config(
             .filter(|rule| !rule.is_empty())
             .collect(),
     };
-    let path = resolve_for_write(&root_path, ".marktree/config.json")?;
+    let path = resolve_for_write(&root_path, VERSIONED_WORKSPACE_CONFIG)?;
     verify_expected_version(
         &path,
         request.expected_sha256.as_deref(),
@@ -64,15 +63,30 @@ pub fn save_workspace_config(
     )?;
     let bytes = serde_json::to_vec_pretty(&normalized)?;
     let sha256 = hash_bytes(&bytes);
-    if git::has_git_capability(&request.root) {
-        app_state.record_workspace_change(
-            &request.root,
-            ".marktree/config.json",
-            WorkspaceChangeOperation::Upsert,
-            Some(&sha256),
-        )?;
-    }
-    atomic_write(&path, &bytes)?;
+    execute_mutation(
+        &request.root,
+        WorkspaceOperationKind::WriteFile {
+            path: VERSIONED_WORKSPACE_CONFIG.to_owned(),
+            version: sha256.clone(),
+            previous_version: request.expected_sha256.clone(),
+            replace_existing: false,
+        },
+        vec![WorkspaceChangeIntent::upsert(
+            VERSIONED_WORKSPACE_CONFIG,
+            &sha256,
+        )],
+        app_state,
+        (),
+        |operation| {
+            atomic_write_if_version(
+                &path,
+                &bytes,
+                request.expected_sha256.as_deref(),
+                request.expected_missing,
+                &operation.id,
+            )
+        },
+    )?;
     Ok(WorkspaceConfigSnapshot {
         config: normalized,
         sha256: Some(sha256),
@@ -80,7 +94,7 @@ pub fn save_workspace_config(
     })
 }
 
-pub(super) fn build_ignore_set(rules: &[String]) -> AppResult<GlobSet> {
+pub(crate) fn build_ignore_set(rules: &[String]) -> AppResult<GlobSet> {
     let mut builder = GlobSetBuilder::new();
     for rule in rules {
         let normalized = rule.trim().replace('\\', "/");

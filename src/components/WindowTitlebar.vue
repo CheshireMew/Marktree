@@ -1,9 +1,9 @@
 <script setup lang="ts">
 import { Copy, Minus, Square, X } from 'lucide-vue-next'
-import { getCurrentWindow } from '@tauri-apps/api/window'
 import { onBeforeUnmount, onMounted, ref } from 'vue'
 
 import { isTauri } from '@/lib/api'
+import { windowService } from '@/lib/windowService'
 
 defineProps<{
   context?: string
@@ -18,23 +18,22 @@ let unlistenResize: (() => void) | undefined
 
 async function refreshMaximizedState() {
   if (!isTauri()) return
-  maximized.value = await getCurrentWindow().isMaximized()
+  maximized.value = await windowService.isMaximized()
 }
 
 async function runWindowAction(action: 'minimize' | 'maximize' | 'close') {
   if (!isTauri()) return
   try {
-    const currentWindow = getCurrentWindow()
     if (action === 'minimize') {
-      await currentWindow.minimize()
+      await windowService.minimize()
       return
     }
     if (action === 'maximize') {
-      await currentWindow.toggleMaximize()
+      await windowService.toggleMaximize()
       await refreshMaximizedState()
       return
     }
-    await currentWindow.close()
+    await windowService.requestClose()
   } catch (reason) {
     emit('error', reason)
   }
@@ -44,7 +43,7 @@ onMounted(async () => {
   if (!isTauri()) return
   try {
     await refreshMaximizedState()
-    unlistenResize = await getCurrentWindow().onResized(() => {
+    unlistenResize = await windowService.onResized(() => {
       void refreshMaximizedState().catch((reason) => emit('error', reason))
     })
   } catch (reason) {

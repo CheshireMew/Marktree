@@ -14,6 +14,7 @@ const emit = defineEmits<{
 
 const segments = ref(buildSegments())
 const finalContent = ref(resolvedMergeContent(segments.value))
+const finalManuallyEdited = ref(false)
 const conflictingSegments = computed(() => segments.value.filter((segment) => segment.conflicting))
 
 watch(
@@ -21,6 +22,7 @@ watch(
   () => {
     segments.value = buildSegments()
     finalContent.value = resolvedMergeContent(segments.value)
+    finalManuallyEdited.value = false
   },
 )
 
@@ -36,7 +38,18 @@ function choose(segmentId: string, content: string) {
   const segment = segments.value.find((candidate) => candidate.id === segmentId)
   if (!segment) return
   segment.content = content
+  updateGeneratedFinal()
+}
+
+function updateGeneratedFinal() {
+  if (!finalManuallyEdited.value) {
+    finalContent.value = resolvedMergeContent(segments.value)
+  }
+}
+
+function regenerateFinal() {
   finalContent.value = resolvedMergeContent(segments.value)
+  finalManuallyEdited.value = false
 }
 </script>
 
@@ -61,14 +74,18 @@ function choose(segmentId: string, content: string) {
         </div>
         <label>
           <span>{{ $t('app.mergedSegment') }}</span>
-          <textarea v-model="segment.content" @input="finalContent = resolvedMergeContent(segments)" />
+          <textarea v-model="segment.content" @input="updateGeneratedFinal" />
         </label>
       </article>
     </div>
     <label class="merge-final">
       <span>{{ $t('app.finalMergedContent') }}</span>
-      <textarea v-model="finalContent" />
+      <textarea v-model="finalContent" @input="finalManuallyEdited = true" />
     </label>
+    <div v-if="finalManuallyEdited" class="merge-manual-state" role="status">
+      <span>{{ $t('app.manualMergePreserved') }}</span>
+      <button @click="regenerateFinal">{{ $t('app.regenerateMergedContent') }}</button>
+    </div>
     <footer>
       <button class="primary" @click="emit('resolve', finalContent)">
         {{ $t('app.applyMergedContent') }}

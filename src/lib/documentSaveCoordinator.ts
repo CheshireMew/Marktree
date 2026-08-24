@@ -1,4 +1,5 @@
 import type { EditorTab, SaveDocumentResult } from '@/types'
+import { editorTabIsDirty, retainedDiskContent } from '@/lib/documentMemory'
 
 export type SaveDocumentSnapshot = (
   tab: EditorTab,
@@ -33,10 +34,9 @@ export async function saveEditorTabUntilStable(
       tab.modifiedMs = saved.modifiedMs
       tab.encoding = saved.encoding
       tab.lineEnding = saved.lineEnding
-      tab.diskContent = snapshotContent
+      tab.diskContent = retainedDiskContent(snapshotContent)
       tab.savedRevision = snapshotRevision
-      tab.dirty =
-        tab.revision !== snapshotRevision || tab.content !== snapshotContent
+      tab.dirty = tab.revision !== snapshotRevision || editorTabIsDirty(tab)
       tab.saveError = undefined
     } catch (reason) {
       await onFailure?.(reason)

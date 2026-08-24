@@ -3,15 +3,12 @@ import {
   Cloud,
   FolderOpen,
   FolderPlus,
-  GitBranch,
-  Menu,
-  MoreHorizontal,
-  RefreshCw,
   X,
 } from 'lucide-vue-next'
 import {
   computed,
   defineAsyncComponent,
+  nextTick,
   onBeforeUnmount,
   onMounted,
   ref,
@@ -20,57 +17,87 @@ import {
 import { useI18n } from 'vue-i18n'
 
 import ConflictDialog from '@/components/ConflictDialog.vue'
+import AndroidShareDialog from '@/components/AndroidShareDialog.vue'
 import DiffPanel from '@/components/DiffPanel.vue'
 import GitPanel from '@/components/GitPanel.vue'
 import WorkspaceRail from '@/components/WorkspaceRail.vue'
 import WorkspaceDialogs from '@/components/WorkspaceDialogs.vue'
 import WindowTitlebar from '@/components/WindowTitlebar.vue'
-import WorkspaceSidebar from '@/components/WorkspaceSidebar.vue'
+import WorkspaceSidebar, {
+  type WorkspaceEntryActionRequest,
+} from '@/components/WorkspaceSidebar.vue'
 import WorkspaceOverlays from '@/components/WorkspaceOverlays.vue'
-import { useDialogState } from '@/composables/app/dialogState'
+import WorkspaceTopbar from '@/components/WorkspaceTopbar.vue'
+import {
+  useDialogState,
+  type AppModal,
+  type ConfirmationDialogState,
+} from '@/composables/app/dialogState'
+import { useAndroidShare } from '@/composables/app/useAndroidShare'
+import { useCommandPalette } from '@/composables/app/useCommandPalette'
+import { useNativeSmoke } from '@/composables/app/useNativeSmoke'
 import { useWorkspaceProvisioning } from '@/composables/app/useWorkspaceProvisioning'
 import { useWorkspaceSettings } from '@/composables/app/useWorkspaceSettings'
 import { useWorkspaceLifecycle } from '@/composables/app/useWorkspaceLifecycle'
 import { useWorkspace } from '@/composables/useWorkspace'
-import { readableError } from '@/lib/errors'
+import { editorFontStack, editorPreferences } from '@/lib/editor/preferences'
+import type { WorktreeSearchResult } from '@/types'
 
 const EditorWorkspace = defineAsyncComponent(
   () => import('@/components/EditorWorkspace.vue'),
 )
 const workspace = useWorkspace()
 const { t } = useI18n()
-const { modal, form } = useDialogState()
+const {
+  modal,
+  form,
+  dialogBusy,
+  dialogError,
+  openDialog,
+  closeDialog,
+  runDialogAction,
+} = useDialogState()
 
 const dark = ref(localStorage.getItem('marktree-theme') === 'dark')
 const sidebarOpen = ref(false)
 const gitPanelOpen = ref(false)
 const addMenuOpen = ref(false)
-const quickOpen = ref(false)
-const quickOpenQuery = ref('')
+const addMenu = ref<HTMLElement>()
+const confirmation = ref<ConfirmationDialogState>()
+let confirmationAction: (() => Promise<boolean>) | undefined
+let confirmationReturnModal: AppModal | undefined
+const editorWorkspace = ref<{
+  focusAtLine: (line: number, column?: number) => void
+  insertText: (text: string) => void
+  openSnippetManager: () => void
+}>()
+const workspaceSidebar = ref<{ revealPath: (path: string) => void }>()
 
-let closeActiveModal = () => {
-  modal.value = undefined
-}
-const lifecycle = useWorkspaceLifecycle(workspace, () => {
-  sidebarOpen.value = false
-  if (modal.value && !['clone', 'mobileWorkspace'].includes(modal.value)) {
-    closeActiveModal()
-  }
-})
-const { viewportMobile, nativeAndroid, clearWorkspaceTimers } = lifecycle
+const lifecycle = useWorkspaceLifecycle(workspace)
+const {
+  viewportMobile,
+  nativeAndroid,
+  ready,
+  platformPulse,
+  clearWorkspaceTimers,
+} = lifecycle
+useNativeSmoke(workspace, ready)
 
 const settings = useWorkspaceSettings(
   workspace,
   modal,
   form,
   clearWorkspaceTimers,
+  openDialog,
+  runDialogAction,
+  closeDialog,
 )
-closeActiveModal = settings.closeModal
 const {
   authConfiguration,
   githubDevice,
   githubPending,
   cloneCredentialId,
+  operationLog,
   openSettings,
   saveGenericCredential,
   saveWorkspaceConfig,
@@ -81,12 +108,13 @@ const {
 
 const provisioning = useWorkspaceProvisioning(
   workspace,
-  modal,
   form,
   nativeAndroid,
   addMenuOpen,
   cloneCredentialId,
   settings.prepareCloneCredentials,
+  openDialog,
+  runDialogAction,
   closeModal,
 )
 const {
@@ -95,12 +123,48 @@ const {
   openCloneDialog,
   cloneGitWorkspace,
   createMobileWorkspace,
+  createDesktopWorkspace,
   openNewDocument,
   createDocument,
   openWorktreeDialog,
   createWorktree,
   openWorktreeWindow,
 } = provisioning
+
+const androidShare = useAndroidShare(
+  workspace,
+  nativeAndroid,
+  (markdown) => editorWorkspace.value?.insertText(markdown),
+)
+
+watch(workspace.activeRoot, () => {
+  sidebarOpen.value = false
+  if (modal.value && !['clone', 'mobileWorkspace'].includes(modal.value)) {
+    closeModal()
+  }
+})
+watch(modal, (value) => {
+  if (value === 'confirmation') return
+  confirmation.value = undefined
+  confirmationAction = undefined
+})
+watch(platformPulse, () => void androidShare.detect(), { immediate: true })
+
+const commandPalette = useCommandPalette(workspace, {
+  nativeAndroid,
+  async executeAction(action) {
+    if (action === 'addWorkspace') {
+      await chooseWorkspace(nativeAndroid.value ? 'create' : 'open')
+    } else if (action === 'newDocument') openNewDocument()
+    else if (action === 'newFolder') openEntryAction({ action: 'newFolder', directory: '' })
+    else if (action === 'refresh') await workspace.refreshActive(false)
+    else if (action === 'settings') openSettings()
+    else if (action === 'sync') await workspace.sync()
+    else if (action === 'snippets') editorWorkspace.value?.openSnippetManager()
+  },
+  closeModal,
+  focusResult: (line, column) => editorWorkspace.value?.focusAtLine(line, column),
+})
 
 const mobile = computed(() => viewportMobile.value || nativeAndroid.value)
 const titlebarContext = computed(() => {
@@ -115,22 +179,37 @@ const shellClass = computed(() => ({
   dark: dark.value,
   mobile: mobile.value,
   'sidebar-visible': sidebarOpen.value,
+  compact: editorPreferences.density === 'compact',
 }))
-const quickOpenResults = computed(() => {
-  const needle = quickOpenQuery.value.trim().toLowerCase()
-  return workspace.quickOpenDocuments.value
-    .filter((document) => !needle || document.path.toLowerCase().includes(needle))
-    .slice(0, 40)
-})
-
+const shellStyle = computed(() => ({
+  '--sidebar-width': `${editorPreferences.sidebarWidth}px`,
+  '--editor-font-size': `${editorPreferences.fontSize}px`,
+  '--editor-font-family': editorFontStack(editorPreferences.fontFamily),
+}))
 document.documentElement.dataset.theme = dark.value ? 'dark' : 'light'
 
+function dismissAddMenu(event: PointerEvent) {
+  if (!addMenuOpen.value) return
+  const target = event.target as Element
+  if (
+    addMenu.value?.contains(target) ||
+    target.closest('.workspace-button.subtle, .sidebar-add-workspace')
+  ) return
+  addMenuOpen.value = false
+}
+
+function closeAddMenuOnEscape(event: KeyboardEvent) {
+  if (event.key === 'Escape') addMenuOpen.value = false
+}
+
 onMounted(() => {
-  window.addEventListener('keydown', handleShortcut)
+  document.addEventListener('pointerdown', dismissAddMenu, true)
+  window.addEventListener('keydown', closeAddMenuOnEscape)
 })
 
 onBeforeUnmount(() => {
-  window.removeEventListener('keydown', handleShortcut)
+  document.removeEventListener('pointerdown', dismissAddMenu, true)
+  window.removeEventListener('keydown', closeAddMenuOnEscape)
 })
 
 watch(dark, (value) => {
@@ -138,27 +217,148 @@ watch(dark, (value) => {
   document.documentElement.dataset.theme = value ? 'dark' : 'light'
 })
 
-function handleShortcut(event: KeyboardEvent) {
-  if ((event.ctrlKey || event.metaKey) && event.key.toLowerCase() === 'p') {
-    event.preventDefault()
-    quickOpenQuery.value = ''
-    quickOpen.value = true
-  }
-  if (event.key === 'Escape') {
-    quickOpen.value = false
-    if (modal.value) closeModal()
-  }
+async function revealWorkspacePath(path: string) {
+  if (mobile.value) sidebarOpen.value = true
+  await nextTick()
+  workspaceSidebar.value?.revealPath(path)
 }
 
-async function chooseQuickOpen(path: string) {
-  quickOpen.value = false
-  await workspace.openDocument(path)
+async function openSidebarSearchResult(result: WorktreeSearchResult) {
+  await workspace.openSearchResult(result)
+  await nextTick()
+  if (result.line) editorWorkspace.value?.focusAtLine(result.line, result.column ?? 1)
+  if (mobile.value) sidebarOpen.value = false
+}
+
+function openEntryAction(request: WorkspaceEntryActionRequest) {
+  form.entryAction = request.action
+  form.entryDirectory = request.directory
+  form.entrySourcePath = request.sourcePath ?? ''
+  form.entryOriginalName = request.entryName ?? ''
+  form.entryName = request.suggestedName ?? request.entryName ?? ''
+  openDialog('workspaceEntry')
+}
+
+async function submitEntryAction() {
+  const name = form.entryName.trim()
+  const destination = form.entryDirectory
+    ? `${form.entryDirectory}/${name}`
+    : name
+  const completed = await runDialogAction(async () => {
+    let succeeded = false
+    if (form.entryAction === 'newFolder') {
+      succeeded = Boolean(name) && await workspace.createFolder(destination)
+    } else if (form.entryAction === 'rename') {
+      succeeded = Boolean(name) && name !== form.entryOriginalName &&
+        await workspace.moveWorkspaceEntry(form.entrySourcePath, destination)
+    } else if (form.entryAction === 'duplicate') {
+      succeeded = Boolean(name) &&
+        await workspace.duplicateWorkspaceEntry(form.entrySourcePath, destination)
+    } else {
+      succeeded = await workspace.trashWorkspaceEntry(form.entrySourcePath)
+    }
+    if (!succeeded) throw new Error(workspace.error.value || t('app.errorOperationFailed'))
+    return true
+  })
+  if (completed) closeModal()
+}
+
+function requestConfirmation(
+  state: ConfirmationDialogState,
+  action: () => Promise<boolean>,
+) {
+  confirmationReturnModal = modal.value
+  confirmation.value = state
+  confirmationAction = action
+  openDialog('confirmation')
+}
+
+function closeCurrentModal() {
+  if (modal.value === 'confirmation' && confirmationReturnModal) {
+    const returnTo = confirmationReturnModal
+    confirmationReturnModal = undefined
+    openDialog(returnTo)
+    return
+  }
+  confirmationReturnModal = undefined
+  closeModal()
+}
+
+async function confirmPendingAction() {
+  const action = confirmationAction
+  if (!action) return
+  const completed = await runDialogAction(async () => {
+    if (!await action()) {
+      throw new Error(workspace.error.value || t('app.errorOperationFailed'))
+    }
+    return true
+  })
+  if (completed) {
+    confirmationReturnModal = undefined
+    closeModal()
+  }
 }
 
 function abortPendingOperation() {
-  if (window.confirm(t('app.abortGitOperationConfirm'))) {
-    void workspace.abortGitOperation()
-  }
+  requestConfirmation(
+    {
+      title: t('app.abortGitOperation'),
+      message: t('app.abortGitOperationConfirm'),
+      confirmLabel: t('app.abortGitOperation'),
+      danger: true,
+    },
+    workspace.abortGitOperation,
+  )
+}
+
+function requestDeleteBranch(name: string): Promise<boolean> {
+  requestConfirmation(
+    {
+      title: t('app.deleteBranch'),
+      message: t('app.deleteBranchConfirm', { name }),
+      confirmLabel: t('app.deleteBranch'),
+      danger: true,
+    },
+    () => workspace.deleteBranch(name),
+  )
+  return Promise.resolve(false)
+}
+
+function requestForgetWorkspace() {
+  requestConfirmation(
+    {
+      title: t('app.forgetWorkspace'),
+      message: t('app.forgetWorkspaceConfirm'),
+      confirmLabel: t('app.forgetWorkspace'),
+      danger: true,
+    },
+    forgetActiveWorkspace,
+  )
+}
+
+function requestEmptyTrash() {
+  requestConfirmation(
+    {
+      title: t('app.emptyTrash'),
+      message: t('app.emptyTrashConfirm'),
+      confirmLabel: t('app.emptyTrash'),
+      danger: true,
+    },
+    workspace.emptyWorkspaceTrash,
+  )
+}
+
+async function requestEnableGit() {
+  const message = await runDialogAction(workspace.previewWorkspaceGitBaseline)
+  if (!message) return
+  requestConfirmation(
+    {
+      title: t('app.enableGit'),
+      message,
+      confirmLabel: t('app.enableGit'),
+    },
+    workspace.enableWorkspaceGit,
+  )
 }
 </script>
 
@@ -167,9 +367,9 @@ function abortPendingOperation() {
     <WindowTitlebar
       v-if="!mobile"
       :context="titlebarContext"
-      @error="workspace.error.value = readableError($event)"
+      @error="workspace.reportError($event)"
     />
-    <div class="app-shell" :class="shellClass">
+    <div class="app-shell" :class="shellClass" :style="shellStyle">
     <WorkspaceRail
       v-if="!mobile"
       :workspaces="workspace.workspaces.value"
@@ -180,46 +380,28 @@ function abortPendingOperation() {
       @toggle-theme="dark = !dark"
     />
 
-    <header v-if="mobile" class="mobile-topbar">
-      <button @click="sidebarOpen = !sidebarOpen"><Menu :size="21" /></button>
-      <div>
-        <select
-          v-if="workspace.workspaces.value.length"
-          :value="workspace.activeWorkspaceId.value"
-          :aria-label="$t('app.workspace')"
-          @change="workspace.activateWorkspace(($event.target as HTMLSelectElement).value)"
-        >
-          <option
-            v-for="item in workspace.workspaces.value"
-            :key="item.id"
-            :value="item.id"
-          >
-            {{ item.name }}
-          </option>
-        </select>
-        <strong v-else>Marktree</strong>
-        <span class="mobile-subtitle">
-          <template v-if="workspace.activeWorkspace.value?.git">
-            {{ workspace.activeWorktree.value?.branch ?? $t('app.detachedHead') }}
-            ·
-            <button
-              v-if="workspace.pendingOperation.value"
-              :disabled="workspace.syncing.value"
-              @click="abortPendingOperation"
-            >
-              {{ $t('app.abortGitOperation') }}
-            </button>
-            <template v-if="workspace.pendingOperation.value"> · </template>
-            <button :disabled="workspace.syncing.value" @click="workspace.sync">
-              {{ workspace.syncing.value ? $t('app.syncing') : $t('app.sync') }}
-            </button>
-          </template>
-          <template v-else>{{ $t('app.localWorkspace') }}</template>
-        </span>
-      </div>
-    </header>
+    <WorkspaceTopbar
+      v-if="mobile"
+      :mobile="mobile"
+      :workspaces="workspace.workspaces.value"
+      :active-workspace-id="workspace.activeWorkspaceId.value"
+      :active-workspace="workspace.activeWorkspace.value"
+      :active-worktree="workspace.activeWorktree.value"
+      :active-status="workspace.activeStatus.value"
+      :pending-operation="workspace.pendingOperation.value"
+      :syncing="workspace.syncing.value"
+      :loading="workspace.loading.value"
+      @toggle-sidebar="sidebarOpen = !sidebarOpen"
+      @activate-workspace="workspace.activateWorkspace"
+      @command-palette="commandPalette.show()"
+      @settings="openSettings"
+      @refresh="workspace.refreshActive(false)"
+      @toggle-git-panel="gitPanelOpen = !gitPanelOpen"
+      @abort="abortPendingOperation"
+      @sync="workspace.sync"
+    />
 
-    <div v-if="addMenuOpen" class="add-menu">
+    <div v-if="addMenuOpen" ref="addMenu" class="add-menu">
       <button @click="chooseWorkspace('open')"><FolderOpen :size="16" /> {{ $t('app.openFolder') }}</button>
       <button @click="chooseWorkspace('create')"><FolderPlus :size="16" /> {{ $t('app.newFolder') }}</button>
       <button @click="openCloneDialog"><Cloud :size="16" /> {{ $t('app.clone') }}</button>
@@ -227,88 +409,59 @@ function abortPendingOperation() {
 
     <template v-if="workspace.activeWorkspace.value">
       <WorkspaceSidebar
+        ref="workspaceSidebar"
         :workspace="workspace.activeWorkspace.value"
-        :entries="workspace.filteredEntries.value"
+        :entries="workspace.entries.value"
+        :favorites="workspace.favoriteDocuments.value"
         :search-query="workspace.searchQuery.value"
+        :search-results="workspace.searchResults.value"
+        :searching="workspace.searchInProgress.value"
+        :active-path="workspace.activeTab.value?.path"
         :mobile="mobile"
-        @update:search-query="workspace.searchQuery.value = $event"
+        @update:search-query="workspace.setSearchQuery($event)"
         @search="workspace.search"
+        @open-search-result="openSidebarSearchResult"
         @open-file="workspace.openDocument"
         @new-file="openNewDocument"
-        @new-folder="workspace.createFolder"
+        @request-entry-action="openEntryAction"
         @move-entry="workspace.moveWorkspaceEntry"
-        @trash-entry="workspace.trashWorkspaceEntry"
         @open-system="workspace.openWithSystem"
         @add-workspace="addMenuOpen = !addMenuOpen"
+        @toggle-favorite="workspace.toggleFavoritePath"
       />
 
       <section class="main-column">
-        <header v-if="!mobile" class="workspace-topbar">
-          <div class="branch-status">
-            <strong>{{ workspace.activeWorkspace.value.name }}</strong>
-            <template v-if="workspace.activeWorkspace.value.git">
-              <span>{{ workspace.activeStatus.value?.branch ?? $t('app.detachedHead') }}</span>
-              <i v-if="workspace.activeStatus.value?.ahead">
-                ↑ {{ workspace.activeStatus.value.ahead }}
-              </i>
-              <i v-if="workspace.activeStatus.value?.behind">
-                ↓ {{ workspace.activeStatus.value.behind }}
-              </i>
-            </template>
-            <span v-else>{{ $t('app.localWorkspace') }}</span>
-          </div>
-          <div class="topbar-actions">
-            <button @click="workspace.refreshActive(false)">
-              <RefreshCw :size="16" /> {{ $t('app.refresh') }}
-            </button>
-            <button
-              v-if="workspace.activeWorkspace.value.git"
-              class="advanced-git-button"
-              :disabled="Boolean(workspace.pendingOperation.value)"
-              @click="gitPanelOpen = !gitPanelOpen"
-            >
-              <GitBranch :size="16" />
-              {{
-                workspace.activeStatus.value?.changedCount
-                  ? $t('app.changed', { count: workspace.activeStatus.value.changedCount })
-                  : $t('app.advancedGit')
-              }}
-            </button>
-            <button
-              v-if="workspace.pendingOperation.value"
-              :disabled="workspace.syncing.value"
-              @click="abortPendingOperation"
-            >
-              <X :size="16" /> {{ $t('app.abortGitOperation') }}
-            </button>
-            <button
-              v-if="workspace.activeWorkspace.value.git"
-              class="primary sync-button"
-              :disabled="workspace.syncing.value"
-              @click="workspace.sync"
-            >
-              <RefreshCw :size="16" :class="{ spinning: workspace.syncing.value }" />
-              {{ workspace.syncing.value ? $t('app.syncing') : $t('app.sync') }}
-            </button>
-            <button
-              v-else
-              class="enable-git-button"
-              @click="workspace.enableWorkspaceGit"
-            >
-              <GitBranch :size="16" /> {{ $t('app.enableGit') }}
-            </button>
-            <button class="icon-only" @click="openSettings"><MoreHorizontal :size="18" /></button>
-          </div>
-        </header>
-
+        <WorkspaceTopbar
+          v-if="!mobile"
+          :mobile="false"
+          :workspaces="workspace.workspaces.value"
+          :active-workspace-id="workspace.activeWorkspaceId.value"
+          :active-workspace="workspace.activeWorkspace.value"
+          :active-worktree="workspace.activeWorktree.value"
+          :active-status="workspace.activeStatus.value"
+          :pending-operation="workspace.pendingOperation.value"
+          :syncing="workspace.syncing.value"
+          :loading="workspace.loading.value"
+          @activate-workspace="workspace.activateWorkspace"
+          @command-palette="commandPalette.show()"
+          @settings="openSettings"
+          @refresh="workspace.refreshActive(false)"
+          @toggle-git-panel="gitPanelOpen = !gitPanelOpen"
+          @abort="abortPendingOperation"
+          @sync="workspace.sync"
+        />
         <EditorWorkspace
+          ref="editorWorkspace"
           :tabs="workspace.tabs.value"
+          :entries="workspace.entries.value"
           :active-tab="workspace.activeTab.value"
           :active-key="workspace.activeTabKey.value"
           :dark="dark"
+          :favorite="workspace.activeDocumentIsFavorite()"
           :load-workspace-image="workspace.loadWorkspaceImage"
+          :document-character-limit="workspace.activeDocumentCharacterLimit.value"
           :can-compare="Boolean(workspace.activeWorkspace.value.git)"
-          @activate="workspace.activeTabKey.value = $event"
+          @activate="workspace.selectTab($event)"
           @close="workspace.closeTab"
           @update-content="workspace.updateActiveContent"
           @asset="workspace.writeImage"
@@ -319,6 +472,10 @@ function abortPendingOperation() {
                 ? workspace.showDiff('worktreeToHead')
                 : undefined
           "
+          @open-path="workspace.openDocument"
+          @toggle-favorite="workspace.toggleActiveDocumentFavorite"
+          @reveal-path="revealWorkspacePath"
+          @error="workspace.reportError($event)"
         />
 
         <footer class="status-bar">
@@ -345,12 +502,13 @@ function abortPendingOperation() {
         :branches="workspace.branches.value"
         :worktrees="workspace.activeWorkspace.value.git?.worktrees ?? []"
         :active-root="workspace.activeRoot.value"
+        :busy-action="workspace.gitBusyAction.value"
+        :run-action="workspace.gitAction"
+        :set-staged="workspace.setPathStaged"
+        :create-branch="workspace.createBranch"
+        :checkout-branch="workspace.checkoutBranch"
+        :delete-branch="requestDeleteBranch"
         @close="gitPanelOpen = false"
-        @action="workspace.gitAction"
-        @set-staged="workspace.setPathStaged"
-        @create-branch="workspace.createBranch"
-        @checkout-branch="workspace.checkoutBranch"
-        @delete-branch="workspace.deleteBranch"
         @select-worktree="workspace.selectWorktree"
         @new-worktree="openWorktreeDialog"
         @open-window="openWorktreeWindow"
@@ -359,7 +517,7 @@ function abortPendingOperation() {
       <DiffPanel
         v-if="workspace.diffOpen.value && workspace.diffResult.value"
         :result="workspace.diffResult.value"
-        @close="workspace.diffOpen.value = false"
+        @close="workspace.closeDiff"
         @mode="workspace.showDiff"
       />
     </template>
@@ -392,6 +550,10 @@ function abortPendingOperation() {
       <span>{{ workspace.error.value || workspace.message.value }}</span>
       <button @click="workspace.clearNotice"><X :size="15" /></button>
     </div>
+    <div v-if="workspace.loading.value" class="workspace-progress" role="status">
+      <span />
+      <em>{{ $t('app.working') }}</em>
+    </div>
 
     <WorkspaceDialogs
       :modal="modal"
@@ -403,31 +565,67 @@ function abortPendingOperation() {
       :github-pending="githubPending"
       :clone-credential-id="cloneCredentialId"
       :trash-entries="workspace.trashEntries.value"
-      @close="closeModal"
+      :operation-log="operationLog"
+      :busy="dialogBusy"
+      :error="dialogError"
+      :confirmation="confirmation"
+      @close="closeCurrentModal"
       @choose-clone-destination="chooseCloneDestination"
       @clone="cloneGitWorkspace"
       @begin-github-login="beginGithubLogin"
       @create-document="createDocument"
       @create-mobile-workspace="createMobileWorkspace"
+      @create-desktop-workspace="createDesktopWorkspace"
       @create-worktree="createWorktree"
+      @submit-entry-action="submitEntryAction"
       @save-generic-credential="saveGenericCredential"
       @save-workspace-config="saveWorkspaceConfig"
-      @forget-active-workspace="forgetActiveWorkspace"
+      @enable-git="requestEnableGit"
+      @forget-active-workspace="requestForgetWorkspace"
       @restore-trash="workspace.restoreWorkspaceTrash"
-      @empty-trash="workspace.emptyWorkspaceTrash"
+      @empty-trash="requestEmptyTrash"
+      @confirm="confirmPendingAction"
+      @export-workspace-archive="androidShare.exportWorkspace"
+    />
+
+    <AndroidShareDialog
+      v-if="androidShare.pending.value"
+      :share="androidShare.pending.value"
+      :workspaces="workspace.workspaces.value"
+      :selected-root="androidShare.selectedRoot.value"
+      :selected-directory="androidShare.selectedDirectory.value"
+      :directories="androidShare.directories.value"
+      :active-root="workspace.activeRoot.value"
+      :active-document-path="
+        workspace.activeTab.value && /\.(?:md|markdown|mdx)$/i.test(workspace.activeTab.value.path)
+          ? workspace.activeTab.value.path
+          : undefined
+      "
+      :importing="androidShare.importing.value"
+      @close="androidShare.pending.value = undefined"
+      @select-root="androidShare.selectRoot"
+      @select-directory="androidShare.selectedDirectory.value = $event"
+      @import="androidShare.importShare"
     />
 
     <WorkspaceOverlays
       :external-comparison="workspace.externalComparison.value"
-      :quick-open="quickOpen"
-      :quick-open-query="quickOpenQuery"
-      :quick-open-results="quickOpenResults"
-      :image-preview="workspace.imagePreview.value"
+      :command-palette-open="commandPalette.open.value"
+      :command-palette-query="commandPalette.query.value"
+      :command-palette-results="commandPalette.results.value"
+      :command-palette-searching="commandPalette.searching.value"
+      :command-palette-path-prefix="commandPalette.pathPrefix.value"
+      :command-palette-file-kind="commandPalette.fileKind.value"
+      :command-palette-modified-days="commandPalette.modifiedDays.value"
+      :file-preview="workspace.filePreview.value"
       @choose-external-version="workspace.chooseExternalVersion"
-      @close-quick-open="quickOpen = false"
-      @update-quick-open-query="quickOpenQuery = $event"
-      @choose-quick-open="chooseQuickOpen"
-      @close-image-preview="workspace.imagePreview.value = undefined"
+      @close-command-palette="commandPalette.open.value = false"
+      @update-command-palette-query="commandPalette.query.value = $event"
+      @update-command-palette-path-prefix="commandPalette.pathPrefix.value = $event"
+      @update-command-palette-file-kind="commandPalette.fileKind.value = $event"
+      @update-command-palette-modified-days="commandPalette.modifiedDays.value = $event"
+      @choose-command-palette="commandPalette.choose"
+      @close-file-preview="workspace.closeFilePreview"
     />
 
       <ConflictDialog

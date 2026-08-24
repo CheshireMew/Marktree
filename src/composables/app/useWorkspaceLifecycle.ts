@@ -1,27 +1,42 @@
 import { listen, type UnlistenFn } from '@tauri-apps/api/event'
-import { getCurrentWindow } from '@tauri-apps/api/window'
 import { type as osType } from '@tauri-apps/plugin-os'
 import { onBeforeUnmount, onMounted, ref, watch } from 'vue'
 
-import type { useWorkspace } from '@/composables/useWorkspace'
+import type { WorkspaceApi } from '@/composables/useWorkspace'
 import { i18n } from '@/i18n'
 import { isTauri, nativeApi } from '@/lib/api'
-import { readableError } from '@/lib/errors'
+import { windowService } from '@/lib/windowService'
 import type {
   WorkspaceChangedEvent,
   WorkspaceForgottenEvent,
   WorkspaceWatchErrorEvent,
 } from '@/types'
 
-type Workspace = ReturnType<typeof useWorkspace>
+type Workspace = Pick<
+  WorkspaceApi,
+  | 'activeRoot'
+  | 'activeWorkspace'
+  | 'flushAll'
+  | 'handleWorkspaceChanged'
+  | 'handleWorkspaceForgotten'
+  | 'initializeWorkspace'
+  | 'refreshActive'
+  | 'reportError'
+  | 'search'
+  | 'searchQuery'
+>
 
 export function useWorkspaceLifecycle(
   workspace: Workspace,
-  onActiveRootChanged: () => void,
 ) {
   const viewportMobile = ref(window.innerWidth < 760)
   const nativeAndroid = ref(false)
+  const ready = ref(false)
+  const platformPulse = ref(0)
   const filesystemRefreshTimers = new Map<string, number>()
+  const pendingFilesystemRefreshes = new Set<string>()
+  const refreshingRoots = new Set<string>()
+  const changedPathsByRoot = new Map<string, Set<string>>()
   let refreshTimer: number | undefined
   let searchTimer: number | undefined
   let unlistenWorkspaceChanges: UnlistenFn | undefined
@@ -29,12 +44,49 @@ export function useWorkspaceLifecycle(
   let unlistenWorkspaceForgotten: UnlistenFn | undefined
   let unlistenCloseRequested: UnlistenFn | undefined
   let closingWindow = false
+  let watchedRoot: string | undefined
 
   function clearWorkspaceTimers(roots: Iterable<string>) {
     for (const root of roots) {
       const timer = filesystemRefreshTimers.get(root)
       if (timer) window.clearTimeout(timer)
       filesystemRefreshTimers.delete(root)
+      pendingFilesystemRefreshes.delete(root)
+      changedPathsByRoot.delete(root)
+    }
+  }
+
+  function queueWorkspaceRefresh(root: string, paths: string[] = []) {
+    pendingFilesystemRefreshes.add(root)
+    let changedPaths = changedPathsByRoot.get(root)
+    if (!changedPaths) {
+      changedPaths = new Set()
+      changedPathsByRoot.set(root, changedPaths)
+    }
+    for (const path of paths) changedPaths.add(path)
+    const timer = filesystemRefreshTimers.get(root)
+    if (timer) window.clearTimeout(timer)
+    filesystemRefreshTimers.set(
+      root,
+      window.setTimeout(() => {
+        filesystemRefreshTimers.delete(root)
+        void drainWorkspaceRefresh(root)
+      }, 180),
+    )
+  }
+
+  async function drainWorkspaceRefresh(root: string) {
+    if (refreshingRoots.has(root)) return
+    refreshingRoots.add(root)
+    try {
+      while (pendingFilesystemRefreshes.delete(root)) {
+        const paths = [...(changedPathsByRoot.get(root) ?? [])]
+        changedPathsByRoot.delete(root)
+        await workspace.handleWorkspaceChanged(root, paths)
+      }
+    } finally {
+      refreshingRoots.delete(root)
+      if (pendingFilesystemRefreshes.has(root)) queueWorkspaceRefresh(root)
     }
   }
 
@@ -53,13 +105,18 @@ export function useWorkspaceLifecycle(
   function handleVisibilityChange() {
     if (document.visibilityState === 'hidden') {
       void workspace.flushAll().catch((reason) => {
-        workspace.error.value = readableError(reason)
+        workspace.reportError(reason)
       })
     }
   }
 
+  function handleWindowFocus() {
+    if (isTauri()) platformPulse.value += 1
+  }
+
   onMounted(async () => {
     window.addEventListener('resize', updateViewport)
+    window.addEventListener('focus', handleWindowFocus)
     document.addEventListener('visibilitychange', handleVisibilityChange)
     if (isTauri()) {
       try {
@@ -68,14 +125,7 @@ export function useWorkspaceLifecycle(
           'workspace-changed',
           (event) => {
             const { root } = event.payload
-            clearWorkspaceTimers([root])
-            filesystemRefreshTimers.set(
-              root,
-              window.setTimeout(() => {
-                filesystemRefreshTimers.delete(root)
-                void workspace.handleWorkspaceChanged(root)
-              }, 180),
-            )
+            queueWorkspaceRefresh(root, event.payload.paths)
           },
         )
         unlistenWorkspaceForgotten = await listen<WorkspaceForgottenEvent>(
@@ -91,31 +141,37 @@ export function useWorkspaceLifecycle(
         unlistenWorkspaceWatchError = await listen<WorkspaceWatchErrorEvent>(
           'workspace-watch-error',
           (event) => {
-            workspace.error.value = i18n.global.t('app.workspaceWatchFailed', {
+            workspace.reportError(i18n.global.t('app.workspaceWatchFailed', {
               root: event.payload.root,
               message: event.payload.message,
-            })
+            }))
           },
         )
-        unlistenCloseRequested = await getCurrentWindow().onCloseRequested(
+        unlistenCloseRequested = await windowService.onCloseRequested(
           async (event) => {
-            if (closingWindow) return
             event.preventDefault()
+            if (closingWindow) return
+            closingWindow = true
             try {
               await workspace.flushAll()
-              closingWindow = true
-              await getCurrentWindow().destroy()
+              if (watchedRoot) {
+                await nativeApi.unwatchWorkspace({ root: watchedRoot })
+                watchedRoot = undefined
+              }
+              await windowService.destroyAfterFlush()
             } catch (reason) {
-              workspace.error.value = readableError(reason)
+              closingWindow = false
+              workspace.reportError(reason)
             }
           },
         )
       } catch (reason) {
-        workspace.error.value = readableError(reason)
+        workspace.reportError(reason)
       }
     }
     await workspace.initializeWorkspace()
-    await refreshForPlatform()
+    ready.value = true
+    platformPulse.value += 1
     refreshTimer = window.setInterval(() => {
       if (document.visibilityState === 'visible') void refreshForPlatform()
     }, 5 * 60 * 1000)
@@ -123,26 +179,33 @@ export function useWorkspaceLifecycle(
 
   onBeforeUnmount(() => {
     window.removeEventListener('resize', updateViewport)
+    window.removeEventListener('focus', handleWindowFocus)
     document.removeEventListener('visibilitychange', handleVisibilityChange)
     if (refreshTimer) window.clearInterval(refreshTimer)
     if (searchTimer) window.clearTimeout(searchTimer)
     clearWorkspaceTimers(filesystemRefreshTimers.keys())
+    if (watchedRoot && isTauri()) {
+      void nativeApi.unwatchWorkspace({ root: watchedRoot }).catch(() => undefined)
+    }
     unlistenWorkspaceChanges?.()
     unlistenWorkspaceWatchError?.()
     unlistenWorkspaceForgotten?.()
     unlistenCloseRequested?.()
   })
 
-  watch(workspace.activeRoot, () => {
-    onActiveRootChanged()
-    if (workspace.activeRoot.value && isTauri()) {
+  watch(workspace.activeRoot, (nextRoot, previousRoot) => {
+    if (previousRoot && isTauri()) {
+      clearWorkspaceTimers([previousRoot])
+      void nativeApi.unwatchWorkspace({ root: previousRoot }).catch(() => undefined)
+    }
+    watchedRoot = nextRoot
+    if (nextRoot && isTauri()) {
       void nativeApi
-        .watchWorkspace({ root: workspace.activeRoot.value })
+        .watchWorkspace({ root: nextRoot })
         .catch((reason) => {
-          workspace.error.value = readableError(reason)
+          workspace.reportError(reason)
         })
     }
-    void refreshForPlatform()
   })
 
   watch(workspace.searchQuery, () => {
@@ -157,6 +220,8 @@ export function useWorkspaceLifecycle(
   return {
     viewportMobile,
     nativeAndroid,
+    ready,
+    platformPulse,
     clearWorkspaceTimers,
     refreshForPlatform,
   }

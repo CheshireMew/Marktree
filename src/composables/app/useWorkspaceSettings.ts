@@ -1,15 +1,27 @@
 import { openUrl } from '@tauri-apps/plugin-opener'
 import { onBeforeUnmount, ref, type Ref } from 'vue'
 
-import type { useWorkspace } from '@/composables/useWorkspace'
+import type { WorkspaceApi } from '@/composables/useWorkspace'
 import { i18n } from '@/i18n'
 import { isTauri, nativeApi } from '@/lib/api'
-import { readableError } from '@/lib/errors'
-import type { AuthConfiguration, GithubDeviceCode } from '@/types'
+import type {
+  AuthConfiguration,
+  GithubDeviceCode,
+  OperationLogEntry,
+} from '@/types'
 
 import type { AppModal, WorkspaceDialogForm } from './dialogState'
 
-type Workspace = ReturnType<typeof useWorkspace>
+type Workspace = Pick<
+  WorkspaceApi,
+  | 'activeRoot'
+  | 'activeWorkspace'
+  | 'forgetActiveWorkspace'
+  | 'loadDocuments'
+  | 'loadWorkspaceTrash'
+  | 'notify'
+  | 'reportError'
+>
 type GithubCredentialTarget =
   | { kind: 'clone' }
   | { kind: 'workspace'; workspaceId: string; root: string }
@@ -19,6 +31,9 @@ export function useWorkspaceSettings(
   modal: Ref<AppModal | undefined>,
   form: WorkspaceDialogForm,
   clearWorkspaceTimers: (roots: Iterable<string>) => void,
+  openDialog: (value: AppModal) => void,
+  runDialogAction: <T>(action: () => Promise<T>) => Promise<T | undefined>,
+  closeDialog: () => void,
 ) {
   const authConfiguration = ref<AuthConfiguration>()
   const githubDevice = ref<GithubDeviceCode>()
@@ -27,6 +42,7 @@ export function useWorkspaceSettings(
   const workspaceConfigSha256 = ref<string | null>(null)
   const workspaceConfigMissing = ref(true)
   const workspaceConfigRoot = ref<string>()
+  const operationLog = ref<OperationLogEntry[]>([])
   let githubPollTimer: number | undefined
 
   async function loadAuthConfiguration() {
@@ -42,20 +58,24 @@ export function useWorkspaceSettings(
     try {
       await loadAuthConfiguration()
     } catch (reason) {
-      workspace.error.value = readableError(reason)
+      workspace.reportError(reason)
     }
   }
 
   async function openSettings() {
-    modal.value = 'settings'
+    openDialog('settings')
     form.credentialUsername = ''
     form.credentialToken = ''
     githubDevice.value = undefined
     workspaceConfigRoot.value = workspace.activeRoot.value
     workspaceConfigSha256.value = null
     workspaceConfigMissing.value = true
-    try {
+    operationLog.value = []
+    await runDialogAction(async () => {
       await loadAuthConfiguration()
+      if (isTauri()) {
+        operationLog.value = await nativeApi.readOperationLog({ limit: 50 })
+      }
       if (isTauri() && workspace.activeRoot.value) {
         await workspace.loadWorkspaceTrash()
         const snapshot = await nativeApi.readWorkspaceConfig({
@@ -66,9 +86,8 @@ export function useWorkspaceSettings(
         workspaceConfigSha256.value = snapshot.sha256
         workspaceConfigMissing.value = snapshot.missing
       }
-    } catch (reason) {
-      workspace.error.value = readableError(reason)
-    }
+      return true
+    })
   }
 
   async function saveGenericCredential() {
@@ -76,7 +95,7 @@ export function useWorkspaceSettings(
     const root = workspace.activeRoot.value
     if (!activeWorkspace?.git || !root || !form.credentialToken.trim()) return
     const id = `workspace-${activeWorkspace.id}`
-    try {
+    const saved = await runDialogAction(async () => {
       await nativeApi.saveCredential({
         input: {
           id,
@@ -85,17 +104,16 @@ export function useWorkspaceSettings(
         },
       })
       await nativeApi.setWorkspaceGitCredential({ root, credentialId: id })
-      workspace.message.value = i18n.global.t('app.credentialSaved')
-      closeModal()
-    } catch (reason) {
-      workspace.error.value = readableError(reason)
-    }
+      workspace.notify(i18n.global.t('app.credentialSaved'))
+      return true
+    })
+    if (saved) closeModal()
   }
 
   async function saveWorkspaceConfig() {
     const root = workspaceConfigRoot.value
     if (!root) return
-    try {
+    await runDialogAction(async () => {
       const snapshot = await nativeApi.saveWorkspaceConfig({
         request: {
           root,
@@ -112,28 +130,29 @@ export function useWorkspaceSettings(
       })
       workspaceConfigSha256.value = snapshot.sha256
       workspaceConfigMissing.value = snapshot.missing
-      workspace.message.value = i18n.global.t('app.settingsSaved')
+      workspace.notify(i18n.global.t('app.settingsSaved'))
       await workspace.loadDocuments()
-    } catch (reason) {
-      workspace.error.value = readableError(reason)
-    }
+      return true
+    })
   }
 
-  async function forgetActiveWorkspace() {
-    if (!window.confirm(i18n.global.t('app.forgetWorkspaceConfirm'))) return
+  async function forgetActiveWorkspace(): Promise<boolean> {
     const roots =
       workspace.activeWorkspace.value?.git?.worktrees.map((worktree) => worktree.path) ??
       (workspace.activeWorkspace.value ? [workspace.activeWorkspace.value.root] : [])
     clearWorkspaceTimers(roots)
     try {
       await workspace.forgetActiveWorkspace()
-      closeModal()
+      return true
     } catch (reason) {
-      workspace.error.value = readableError(reason)
+      workspace.reportError(reason)
+      return false
     }
   }
 
   async function beginGithubLogin() {
+    if (githubPending.value) return
+    githubPending.value = true
     const target: GithubCredentialTarget =
       modal.value === 'clone'
         ? { kind: 'clone' }
@@ -147,10 +166,10 @@ export function useWorkspaceSettings(
     try {
       githubDevice.value = await nativeApi.beginGithubDeviceFlow()
       await openUrl(githubDevice.value.verificationUri)
-      githubPending.value = true
       scheduleGithubPoll(target)
     } catch (reason) {
-      workspace.error.value = readableError(reason)
+      githubPending.value = false
+      workspace.reportError(reason)
     }
   }
 
@@ -175,13 +194,13 @@ export function useWorkspaceSettings(
           githubPending.value = false
           githubDevice.value = undefined
           if (target.kind === 'clone') {
-            workspace.message.value = i18n.global.t('app.githubCredentialReady')
+            workspace.notify(i18n.global.t('app.githubCredentialReady'))
           } else {
             await nativeApi.setWorkspaceGitCredential({
               root: target.root,
               credentialId: id,
             })
-            workspace.message.value = i18n.global.t('app.githubConnected')
+            workspace.notify(i18n.global.t('app.githubConnected'))
             closeModal()
           }
         } else if (token.pending) {
@@ -194,7 +213,7 @@ export function useWorkspaceSettings(
         }
       } catch (reason) {
         githubPending.value = false
-        workspace.error.value = readableError(reason)
+        workspace.reportError(reason)
       }
     }, delay)
   }
@@ -203,7 +222,7 @@ export function useWorkspaceSettings(
     if (githubPollTimer) window.clearTimeout(githubPollTimer)
     githubPollTimer = undefined
     githubPending.value = false
-    modal.value = undefined
+    closeDialog()
   }
 
   onBeforeUnmount(() => {
@@ -217,6 +236,7 @@ export function useWorkspaceSettings(
     cloneCredentialId,
     workspaceConfigSha256,
     workspaceConfigMissing,
+    operationLog,
     prepareCloneCredentials,
     openSettings,
     saveGenericCredential,

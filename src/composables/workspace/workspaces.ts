@@ -1,5 +1,9 @@
 import { i18n } from '@/i18n'
 import { isTauri, nativeApi } from '@/lib/api'
+import {
+  removeWorkspaceUiState,
+  restoredWorkspaceSession,
+} from '@/lib/workspaceUiState'
 import type { WorkspaceDescriptor, WorktreeDescriptor, WorktreeSearchResult } from '@/types'
 
 import {
@@ -11,15 +15,18 @@ import {
   beginLoading,
   endLoading,
   ensureSession,
-  message,
   recentFiles,
+  recentFileLimit,
+  sessions,
   workspaces,
   setError,
-  updateWorktreeStatus,
+  setNotice,
 } from './state'
 import { loadDocuments, openDocument } from './documents'
 import { disposeSession, flushAll } from './persistence'
 import { loadDemoWorkspace } from './demo'
+
+const restoredRoots = new Set<string>()
 
 export async function initializeWorkspace() {
   if (!isTauri()) {
@@ -29,24 +36,27 @@ export async function initializeWorkspace() {
   }
   beginLoading()
   try {
-    const state = await nativeApi.getLocalState()
+    const state = await nativeApi.getStartupState()
     recentFiles.value = state.recentFiles
-    for (const root of state.workspaces) {
-      try {
-        const descriptor = await nativeApi.openWorkspace({ path: root })
-        addOrReplaceWorkspace(descriptor)
-      } catch {
-        // A moved or temporarily unavailable workspace remains in local state.
-      }
-    }
+    recentFileLimit.value = state.recentFileLimit
     const queryRoot = new URLSearchParams(location.search).get('root')
     const queryWorktree = new URLSearchParams(location.search).get('worktree')
-    if (queryRoot) {
-      const descriptor = await nativeApi.openWorkspace({ path: queryRoot })
-      addOrReplaceWorkspace(descriptor)
-      await activateWorkspace(descriptor.id, queryWorktree ?? queryRoot)
+    const roots = [...state.workspaces]
+    if (queryRoot && !roots.includes(queryRoot)) roots.push(queryRoot)
+    const restored = await Promise.allSettled(
+      roots.map((root) => nativeApi.openWorkspace({ path: root })),
+    )
+    for (const result of restored) {
+      if (result.status === 'fulfilled') addOrReplaceWorkspace(result.value)
+      // Moved or temporarily unavailable workspaces remain in local state.
+    }
+    const queryIndex = queryRoot ? roots.indexOf(queryRoot) : -1
+    const queriedResult = queryIndex >= 0 ? restored[queryIndex] : undefined
+    const queried = queriedResult?.status === 'fulfilled' ? queriedResult.value : undefined
+    if (queried) {
+      await activateWorkspace(queried.id, queryWorktree ?? queryRoot ?? undefined, true)
     } else if (workspaces.value[0]) {
-      await activateWorkspace(workspaces.value[0].id)
+      await activateWorkspace(workspaces.value[0].id, undefined, true)
     }
   } catch (reason) {
     setError(reason)
@@ -89,18 +99,24 @@ export async function removeWorkspace(workspace: WorkspaceDescriptor) {
   )
   for (const sessionRoot of roots) {
     disposeSession(sessionRoot)
+    restoredRoots.delete(sessionRoot)
   }
+  removeWorkspaceUiState(roots)
   workspaces.value = workspaces.value.filter(
     (candidate) => candidate.id !== workspace.id,
   )
   activeWorkspaceId.value = undefined
   activeWorktreePath.value = undefined
-  message.value = i18n.global.t('app.workspaceForgotten')
+  setNotice(i18n.global.t('app.workspaceForgotten'))
   const next = workspaces.value[0]
   if (next) await activateWorkspace(next.id)
 }
 
-export async function activateWorkspace(id: string, preferredWorktree?: string) {
+export async function activateWorkspace(
+  id: string,
+  preferredWorktree?: string,
+  lazyTabRestore = false,
+) {
   const workspace = workspaces.value.find((item) => item.id === id)
   if (!workspace) return
   activeWorkspaceId.value = id
@@ -114,12 +130,14 @@ export async function activateWorkspace(id: string, preferredWorktree?: string) 
   activeWorktreePath.value = path
   ensureSession(path)
   await loadDocuments(path)
+  await restoreWorkspaceTabs(path, lazyTabRestore)
 }
 
 export async function selectWorktree(worktree: WorktreeDescriptor) {
   activeWorktreePath.value = worktree.path
   ensureSession(worktree.path)
   await loadDocuments(worktree.path)
+  await restoreWorkspaceTabs(worktree.path)
 }
 
 export async function refreshActive(fetchRemote = false, reportError = true) {
@@ -127,52 +145,111 @@ export async function refreshActive(fetchRemote = false, reportError = true) {
   if (!root || !isTauri()) return
   try {
     if (fetchRemote && activeWorkspace.value?.git?.remoteUrl) {
-      const status = await nativeApi.fetch({ root })
-      updateWorktreeStatus(root, status)
+      await nativeApi.fetch({ root })
     }
     const workspaceRoot = activeWorkspace.value?.root ?? root
-    const descriptor = await nativeApi.refreshWorkspace({ root: workspaceRoot })
-    addOrReplaceWorkspace(descriptor)
-    await loadDocuments(root)
+    const snapshot = await nativeApi.refreshWorkspaceView({
+      workspaceRoot,
+      contentRoot: root,
+    })
+    addOrReplaceWorkspace(snapshot.workspace)
+    await loadDocuments(root, snapshot.view)
   } catch (reason) {
     if (reportError) setError(reason)
     else throw reason
   }
 }
 
-export async function enableWorkspaceGit() {
+export async function previewWorkspaceGitBaseline(): Promise<string | undefined> {
   const workspace = activeWorkspace.value
-  if (!workspace || workspace.git || !isTauri()) return
+  if (!workspace || workspace.git || !isTauri()) return undefined
+  const preview = await nativeApi.previewWorkspaceGitBaseline({
+    root: workspace.root,
+  })
+  return i18n.global.t('app.enableGitConfirm', {
+    count: preview.fileCount,
+    size: formatBytes(preview.totalBytes),
+    ignored: preview.ignoredCount,
+  })
+}
+
+export async function enableWorkspaceGit(): Promise<boolean> {
+  const workspace = activeWorkspace.value
+  if (!workspace || workspace.git || !isTauri()) return false
   try {
-    const preview = await nativeApi.previewWorkspaceGitBaseline({
-      root: workspace.root,
-    })
-    const confirmed = window.confirm(
-      i18n.global.t('app.enableGitConfirm', {
-        count: preview.fileCount,
-        size: formatBytes(preview.totalBytes),
-        ignored: preview.ignoredCount,
-      }),
-    )
-    if (!confirmed) return
     beginLoading()
     const descriptor = await nativeApi.enableWorkspaceGit({ root: workspace.root })
     addOrReplaceWorkspace(descriptor)
     await activateWorkspace(descriptor.id)
-    message.value = i18n.global.t('app.gitEnabled')
+    setNotice(i18n.global.t('app.gitEnabled'))
+    return true
   } catch (reason) {
     setError(reason)
+    return false
   } finally {
     endLoading()
   }
 }
 
 export async function openSearchResult(result: WorktreeSearchResult) {
-  const worktree = activeWorkspace.value?.git?.worktrees.find(
-    (candidate) => candidate.path === result.root,
+  const owner = workspaces.value.find(
+    (candidate) =>
+      candidate.root === result.root ||
+      candidate.git?.worktrees.some((worktree) => worktree.path === result.root),
   )
-  if (worktree) await selectWorktree(worktree)
+  if (owner && owner.id !== activeWorkspace.value?.id) {
+    await activateWorkspace(owner.id, result.root)
+  } else {
+    const worktree = owner?.git?.worktrees.find(
+      (candidate) => candidate.path === result.root,
+    )
+    if (worktree && activeRoot.value !== worktree.path) await selectWorktree(worktree)
+  }
   await openDocument(result.path)
+}
+
+async function restoreWorkspaceTabs(root: string, lazy = false) {
+  if (restoredRoots.has(root)) return
+  restoredRoots.add(root)
+  const restored = restoredWorkspaceSession(root)
+  if (!restored) return
+  const session = ensureSession(root)
+  const available = new Set(
+    session.entries
+      .filter(
+        (entry) =>
+          entry.entryType === 'file' &&
+          (entry.fileKind === 'markdown' || entry.fileKind === 'text'),
+      )
+      .map((entry) => entry.path),
+  )
+  const paths = restored.tabs.filter((candidate) => available.has(candidate))
+  if (!lazy) {
+    for (const path of paths) await openDocument(path)
+    if (restored.active && session.tabs.some((tab) => tab.path === restored.active)) {
+      session.activeTabKey = `${root}\n${restored.active}`
+    }
+    return
+  }
+  const active = restored.active && paths.includes(restored.active)
+    ? restored.active
+    : paths[0]
+  if (!active) return
+  await openDocument(active)
+  const remaining = paths.filter((path) => path !== active)
+  void restoreTabsInBackground(root, remaining)
+}
+
+async function restoreTabsInBackground(root: string, paths: string[]) {
+  let cursor = 0
+  const worker = async () => {
+    while (cursor < paths.length && sessions.has(root)) {
+      const path = paths[cursor]
+      cursor += 1
+      if (path) await openDocument(path, { activate: false, remember: false, root })
+    }
+  }
+  await Promise.all([worker(), worker()])
 }
 
 function formatBytes(bytes: number) {

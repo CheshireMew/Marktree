@@ -87,7 +87,7 @@
 
 .notice {
   position: fixed;
-  z-index: 80;
+  z-index: 130;
   right: 18px;
   bottom: 38px;
   display: flex;
@@ -101,6 +101,46 @@
   background: var(--surface);
   box-shadow: var(--shadow);
   font-size: 12px;
+}
+
+.workspace-progress {
+  position: fixed;
+  z-index: 125;
+  top: 36px;
+  right: 0;
+  left: 64px;
+  height: 3px;
+  overflow: hidden;
+  pointer-events: none;
+}
+
+.workspace-progress span {
+  display: block;
+  width: 34%;
+  height: 100%;
+  border-radius: 999px;
+  background: var(--accent);
+  animation: workspace-progress 1.05s ease-in-out infinite;
+}
+
+.workspace-progress em {
+  position: absolute;
+  overflow: hidden;
+  width: 1px;
+  height: 1px;
+  clip: rect(0, 0, 0, 0);
+}
+
+@keyframes workspace-progress {
+  from { transform: translateX(-110%); }
+  to { transform: translateX(395%); }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .workspace-progress span {
+    width: 100%;
+    animation: none;
+  }
 }
 
 .notice.error {

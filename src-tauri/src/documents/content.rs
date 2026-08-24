@@ -1,38 +1,52 @@
-use std::{fs, time::UNIX_EPOCH};
+use std::{fs, path::Path, time::UNIX_EPOCH};
 
 use crate::{
     content_policy::document_kind,
     error::{AppError, AppResult},
-    file_version::{hash_bytes, verify_expected_version},
-    git,
+    file_version::{hash_bytes, hash_file, verify_expected_version},
     paths::{
-        atomic_create, atomic_write, canonical_root, normalize_relative, resolve_existing_file,
-        resolve_for_write,
+        atomic_copy_if_version, atomic_write_if_version, canonical_root,
+        normalize_content_relative, resolve_existing_file, resolve_for_write,
     },
     state::PersistentState,
     types::{
         DocumentContent, DocumentKind, LineEnding, SaveDocumentRequest, SaveDocumentResult,
-        TextEncoding, WorkspaceChangeOperation,
+        TextEncoding,
     },
+    workspace_operation::{execute_mutation, WorkspaceChangeIntent, WorkspaceOperationKind},
 };
+
+pub const MAX_EDITABLE_DOCUMENT_BYTES: u64 = 32 * 1024 * 1024;
+
+fn ensure_editable_size(bytes: u64) -> AppResult<()> {
+    if bytes > MAX_EDITABLE_DOCUMENT_BYTES {
+        return Err(AppError::Message(format!(
+            "This text file is too large to edit in Marktree (maximum {} MiB).",
+            MAX_EDITABLE_DOCUMENT_BYTES / 1024 / 1024
+        )));
+    }
+    Ok(())
+}
 
 pub fn read_document(root: &str, path: &str) -> AppResult<DocumentContent> {
     let root_path = canonical_root(root)?;
-    let file_path = resolve_existing_file(&root_path, path)?;
+    let relative = normalize_content_relative(path)?;
+    let file_path = resolve_existing_file(&root_path, &relative)?;
     let kind = document_kind(&file_path);
     if !matches!(kind, DocumentKind::Markdown | DocumentKind::Text) {
         return Err(AppError::Message(
             "This file type cannot be opened as text.".to_owned(),
         ));
     }
+    let metadata = fs::metadata(&file_path)?;
+    ensure_editable_size(metadata.len())?;
     let bytes = fs::read(&file_path)?;
     let encoding = text_encoding(&bytes);
     let text_bytes = strip_utf8_bom(&bytes);
     let content = String::from_utf8(text_bytes.to_vec())
         .map_err(|_| AppError::Message("The file is not valid UTF-8 text.".to_owned()))?;
-    let metadata = fs::metadata(&file_path)?;
     Ok(DocumentContent {
-        path: normalize_relative(path)?,
+        path: relative,
         content,
         modified_ms: modified_ms(&metadata),
         sha256: hash_bytes(&bytes),
@@ -56,43 +70,33 @@ pub fn save_document(
     request: SaveDocumentRequest,
     app_state: &PersistentState,
 ) -> AppResult<SaveDocumentResult> {
+    validate_save_document(&request)?;
     let root_path = canonical_root(&request.root)?;
-    let relative = normalize_relative(&request.path)?;
+    let relative = normalize_content_relative(&request.path)?;
     let file_path = resolve_for_write(&root_path, &relative)?;
-    if !matches!(
-        document_kind(&file_path),
-        DocumentKind::Markdown | DocumentKind::Text
-    ) {
-        return Err(AppError::Message(
-            "Only Markdown and supported plain-text files can be edited.".to_owned(),
-        ));
-    }
-
-    verify_expected_version(
-        &file_path,
-        request.expected_sha256.as_deref(),
-        request.expected_missing,
-    )?;
-
-    if let Some(parent) = file_path.parent() {
-        fs::create_dir_all(parent)?;
-    }
-    if request.encoding == TextEncoding::Unsupported {
-        return Err(AppError::Message(
-            "Unsupported text encodings cannot be saved.".to_owned(),
-        ));
-    }
     let bytes = encode_text(&request.content, request.encoding);
     let sha256 = hash_bytes(&bytes);
-    if git::has_git_capability(&request.root) {
-        app_state.record_workspace_change(
-            &request.root,
-            &relative,
-            WorkspaceChangeOperation::Upsert,
-            Some(&sha256),
-        )?;
-    }
-    atomic_write(&file_path, &bytes)?;
+    execute_mutation(
+        &request.root,
+        WorkspaceOperationKind::WriteFile {
+            path: relative.clone(),
+            version: sha256.clone(),
+            previous_version: request.expected_sha256.clone(),
+            replace_existing: false,
+        },
+        vec![WorkspaceChangeIntent::upsert(&relative, &sha256)],
+        app_state,
+        (),
+        |operation| {
+            atomic_write_if_version(
+                &file_path,
+                &bytes,
+                request.expected_sha256.as_deref(),
+                request.expected_missing,
+                &operation.id,
+            )
+        },
+    )?;
     let metadata = fs::metadata(&file_path)?;
     let _ = app_state.remember_file(&request.root, &relative);
     Ok(SaveDocumentResult {
@@ -104,19 +108,38 @@ pub fn save_document(
     })
 }
 
+pub fn validate_save_document(request: &SaveDocumentRequest) -> AppResult<()> {
+    ensure_editable_size(request.content.len() as u64)?;
+    let root_path = canonical_root(&request.root)?;
+    let relative = normalize_content_relative(&request.path)?;
+    let file_path = resolve_for_write(&root_path, &relative)?;
+    if !matches!(
+        document_kind(&file_path),
+        DocumentKind::Markdown | DocumentKind::Text
+    ) {
+        return Err(AppError::Message(
+            "Only Markdown and supported plain-text files can be edited.".to_owned(),
+        ));
+    }
+    verify_expected_version(
+        &file_path,
+        request.expected_sha256.as_deref(),
+        request.expected_missing,
+    )?;
+    if request.encoding == TextEncoding::Unsupported {
+        return Err(AppError::Message(
+            "Unsupported text encodings cannot be saved.".to_owned(),
+        ));
+    }
+    Ok(())
+}
+
 pub fn create_document(
     root: &str,
     path: &str,
     app_state: &PersistentState,
 ) -> AppResult<DocumentContent> {
-    let root_path = canonical_root(root)?;
-    let relative = normalize_relative(path)?;
-    let file_path = resolve_for_write(&root_path, &relative)?;
-    if file_path.exists() {
-        return Err(AppError::Message(
-            "A file already exists at that path.".to_owned(),
-        ));
-    }
+    let (relative, file_path) = prepare_new_file_destination(root, path)?;
     if !matches!(
         document_kind(&file_path),
         DocumentKind::Markdown | DocumentKind::Text
@@ -125,20 +148,64 @@ pub fn create_document(
             "New editable files must use a supported Markdown or text extension.".to_owned(),
         ));
     }
-    if let Some(parent) = file_path.parent() {
-        fs::create_dir_all(parent)?;
-    }
     let sha256 = hash_bytes(b"");
-    if git::has_git_capability(root) {
-        app_state.record_workspace_change(
-            root,
-            &relative,
-            WorkspaceChangeOperation::Upsert,
-            Some(&sha256),
-        )?;
-    }
-    atomic_create(&file_path, b"")?;
+    execute_new_file_mutation(root, &relative, &sha256, app_state, |operation_id| {
+        atomic_write_if_version(&file_path, b"", None, true, operation_id)
+    })?;
     read_document(root, &relative)
+}
+
+pub fn import_file_from_path(
+    root: &str,
+    path: &str,
+    source_path: &Path,
+    app_state: &PersistentState,
+) -> AppResult<String> {
+    if !source_path.is_file() {
+        return Err(AppError::Message(
+            "The imported file is no longer available.".to_owned(),
+        ));
+    }
+    let (relative, file_path) = prepare_new_file_destination(root, path)?;
+    let sha256 = hash_file(source_path)?;
+    execute_new_file_mutation(root, &relative, &sha256, app_state, |operation_id| {
+        atomic_copy_if_version(source_path, &file_path, None, true, false, operation_id)
+    })?;
+    Ok(relative)
+}
+
+fn prepare_new_file_destination(root: &str, path: &str) -> AppResult<(String, std::path::PathBuf)> {
+    let root_path = canonical_root(root)?;
+    let relative = normalize_content_relative(path)?;
+    let file_path = resolve_for_write(&root_path, &relative)?;
+    if file_path.exists() {
+        return Err(AppError::Message(
+            "A file already exists at that path.".to_owned(),
+        ));
+    }
+    Ok((relative, file_path))
+}
+
+fn execute_new_file_mutation(
+    root: &str,
+    relative: &str,
+    sha256: &str,
+    app_state: &PersistentState,
+    write: impl FnOnce(&str) -> AppResult<()>,
+) -> AppResult<()> {
+    execute_mutation(
+        root,
+        WorkspaceOperationKind::WriteFile {
+            path: relative.to_owned(),
+            version: sha256.to_owned(),
+            previous_version: None,
+            replace_existing: false,
+        },
+        vec![WorkspaceChangeIntent::upsert(relative, sha256)],
+        app_state,
+        (),
+        |operation| write(&operation.id),
+    )
 }
 
 pub fn read_text_at_root(root: &str, path: &str) -> AppResult<String> {

@@ -6,11 +6,8 @@ mod tests {
     };
 
     use super::*;
-    use base64::{engine::general_purpose::STANDARD, Engine};
     use chrono::Utc;
-    use git2::{
-        Oid, Repository, RepositoryInitOptions, Signature, StashApplyOptions, StashFlags,
-    };
+    use git2::{Oid, Repository, RepositoryInitOptions, Signature, StashApplyOptions, StashFlags};
     use tempfile::TempDir;
 
     use crate::{
@@ -20,14 +17,13 @@ mod tests {
             ConflictChoice, ConflictKind, CreateWorktreeRequest, DiffMode, GitOperationKind,
             GitOperationPhase, PendingGitOperation, SyncStage,
         },
+        workspace_operation::WorkspaceChangeIntent,
     };
 
     use super::{
         conflicts::recovery_metadata,
         remote::push_current_branch,
-        stash::{
-            find_operation_stash, operation_stash_index, stash_if_needed,
-        },
+        stash::{find_operation_stash, operation_stash_index, stash_if_needed},
     };
 
     fn test_signature() -> Signature<'static> {
@@ -131,6 +127,36 @@ mod tests {
     }
 
     #[test]
+    fn git_entry_points_reject_a_plain_workspace_inside_a_parent_repository() {
+        let directory = TempDir::new().unwrap();
+        let app_data = TempDir::new().unwrap();
+        let state = PersistentState::load(app_data.path()).unwrap();
+        let parent = init_with_main(directory.path());
+        let head = commit_file(&parent, "README.md", "# Parent\n", "initial");
+        let child = directory.path().join("plain-workspace");
+        fs::create_dir(&child).unwrap();
+        fs::write(child.join("note.md"), "# Plain\n").unwrap();
+        let root = child.to_string_lossy().into_owned();
+
+        assert!(!has_git_capability(&root));
+        assert!(git_capability(&root).unwrap().is_none());
+        assert!(repository_status(&root).is_err());
+        assert!(stage_all(&root).is_err());
+        assert!(sync_plan(&root, &state).is_err());
+
+        assert_eq!(parent.head().unwrap().target(), Some(head));
+        let status = status_snapshot(&parent).unwrap();
+        assert!(status
+            .files
+            .iter()
+            .all(|entry| entry.index_status == "clean"));
+        assert!(status
+            .files
+            .iter()
+            .any(|entry| entry.path == "plain-workspace/note.md" && entry.untracked));
+    }
+
+    #[test]
     fn rejects_non_https_remote_urls() {
         assert!(validate_remote_url("https://example.com/notes.git").is_ok());
         assert!(validate_remote_url("http://example.com/notes.git").is_err());
@@ -146,21 +172,25 @@ mod tests {
         let repo = Repository::init(directory.path()).unwrap();
         commit_file(&repo, "notes/hello.md", "# Hello\n", "initial");
         commit_file(&repo, "src/code.rs", "fn main() {}\n", "code");
-        fs::write(directory.path().join("notes/hello.md"), "# Updated\n").unwrap();
+        let root = directory.path().to_string_lossy().into_owned();
+        let opened = crate::documents::read_document(&root, "notes/hello.md").unwrap();
+        crate::documents::save_document(
+            crate::types::SaveDocumentRequest {
+                root: root.clone(),
+                path: opened.path,
+                content: "# Updated\n".to_owned(),
+                expected_sha256: Some(opened.sha256),
+                expected_missing: false,
+                encoding: opened.encoding,
+            },
+            &state,
+        )
+        .unwrap();
         fs::write(
             directory.path().join("src/code.rs"),
             "fn main() { println!(\"keep me local\"); }\n",
         )
         .unwrap();
-        let root = directory.path().to_string_lossy().into_owned();
-        state
-            .record_workspace_change(
-                &root,
-                "notes/hello.md",
-                crate::types::WorkspaceChangeOperation::Upsert,
-                Some(&hash_bytes(b"# Updated\n")),
-            )
-            .unwrap();
 
         let plan = sync_plan(&root, &state).unwrap();
         assert_eq!(plan.changed_paths, vec!["notes/hello.md"]);
@@ -319,16 +349,21 @@ mod tests {
         let state = PersistentState::load(state_dir.path()).unwrap();
         let repo = init_with_main(directory.path());
         commit_file(&repo, "notes/shared.md", "# Shared\n", "initial");
-        fs::write(directory.path().join("notes/shared.md"), "# Updated\n").unwrap();
         let root = directory.path().to_string_lossy().into_owned();
-        let managed = state
-            .record_workspace_change(
-                &root,
-                "notes/shared.md",
-                crate::types::WorkspaceChangeOperation::Upsert,
-                Some(&hash_bytes(b"# Updated\n")),
-            )
-            .unwrap();
+        let opened = crate::documents::read_document(&root, "notes/shared.md").unwrap();
+        crate::documents::save_document(
+            crate::types::SaveDocumentRequest {
+                root: root.clone(),
+                path: opened.path,
+                content: "# Updated\n".to_owned(),
+                expected_sha256: Some(opened.sha256),
+                expected_missing: false,
+                encoding: opened.encoding,
+            },
+            &state,
+        )
+        .unwrap();
+        let managed = state.workspace_changes(&root).remove(0);
         let operation_id = "commit-crash-resume";
         let operation = PendingGitOperation {
             id: operation_id.to_owned(),
@@ -367,6 +402,66 @@ mod tests {
             Some(committed)
         );
         assert_eq!(repo.head().unwrap().target(), Some(committed));
+    }
+
+    #[test]
+    fn commit_phase_revalidates_managed_content_before_staging() {
+        let directory = TempDir::new().unwrap();
+        let state_dir = TempDir::new().unwrap();
+        let state = PersistentState::load(state_dir.path()).unwrap();
+        let repo = init_with_main(directory.path());
+        let initial = commit_file(&repo, "notes/shared.md", "# Shared\n", "initial");
+        let root = directory.path().to_string_lossy().into_owned();
+        let opened = crate::documents::read_document(&root, "notes/shared.md").unwrap();
+        crate::documents::save_document(
+            crate::types::SaveDocumentRequest {
+                root: root.clone(),
+                path: opened.path,
+                content: "# Marktree\n".to_owned(),
+                expected_sha256: Some(opened.sha256),
+                expected_missing: false,
+                encoding: opened.encoding,
+            },
+            &state,
+        )
+        .unwrap();
+        let managed = state.workspace_changes(&root).remove(0);
+        let operation = PendingGitOperation {
+            id: "commit-content-race".to_owned(),
+            root: root.clone(),
+            kind: GitOperationKind::Sync,
+            phase: GitOperationPhase::Commit,
+            started_at: Utc::now().to_rfc3339(),
+            workspace_changes: vec![managed],
+            changed_paths: vec!["notes/shared.md".to_owned()],
+            committed: false,
+            commit_id: None,
+            pulled: false,
+            pushed: false,
+            original_head_oid: None,
+            stash_oid: None,
+            aborting: false,
+            stash_apply_started: false,
+            stash_applied: false,
+        };
+        state.begin_git_operation(operation).unwrap();
+        fs::write(directory.path().join("notes/shared.md"), "# External\n").unwrap();
+
+        let result = resume_git_operation(&root, None, &state).unwrap();
+
+        assert_eq!(result.failure_stage, Some(SyncStage::Commit));
+        assert_eq!(
+            result.error.unwrap().code,
+            crate::error::ErrorCode::ManagedContentChanged
+        );
+        assert!(!result.committed);
+        assert_eq!(repo.head().unwrap().target(), Some(initial));
+        assert!(state.pending_git_operation(&root).is_none());
+        assert_eq!(state.workspace_changes(&root).len(), 1);
+        assert_eq!(
+            fs::read_to_string(directory.path().join("notes/shared.md")).unwrap(),
+            "# External\n"
+        );
     }
 
     #[test]
@@ -412,8 +507,8 @@ mod tests {
                 .pushed
         );
 
-        let fetched = fetch(&local.root, None).unwrap();
-        assert_eq!(fetched.behind, 1);
+        fetch(&local.root, None).unwrap();
+        assert_eq!(repository_status(&local.root).unwrap().behind, 1);
         let pulled = pull_rebase(&local.root, None, &local_state).unwrap();
         assert!(pulled.pulled);
         assert_eq!(
@@ -439,14 +534,19 @@ mod tests {
         )
         .unwrap();
         let current = fs::read(Path::new(&local.root).join("notes/shared.md")).unwrap();
-        state
-            .record_workspace_change(
-                &local.root,
-                "notes/shared.md",
-                crate::types::WorkspaceChangeOperation::Upsert,
-                Some(&hash_bytes(&current)),
-            )
-            .unwrap();
+        let opened = crate::documents::read_document(&local.root, "notes/shared.md").unwrap();
+        crate::documents::save_document(
+            crate::types::SaveDocumentRequest {
+                root: local.root.clone(),
+                path: opened.path,
+                content: String::from_utf8(current).unwrap(),
+                expected_sha256: Some(opened.sha256),
+                expected_missing: false,
+                encoding: opened.encoding,
+            },
+            &state,
+        )
+        .unwrap();
 
         let result = sync_workspace_changes(&local.root, None, &state).unwrap();
         assert!(result.pushed);
@@ -520,7 +620,8 @@ mod tests {
         let state = PersistentState::load(state_dir.path()).unwrap();
         let local_path = sandbox.path().join("local");
         crate::workspace::create_workspace(local_path.to_str().unwrap(), &state).unwrap();
-        let descriptor = crate::workspace::enable_git(local_path.to_str().unwrap()).unwrap();
+        let descriptor =
+            crate::workspace::enable_git(local_path.to_str().unwrap(), &state).unwrap();
         let repo = Repository::open(&descriptor.root).unwrap();
         repo.remote("origin", remote_path.to_str().unwrap())
             .unwrap();
@@ -576,6 +677,56 @@ mod tests {
     }
 
     #[test]
+    fn plain_config_enters_git_baseline_and_is_consumed_by_a_second_clone() {
+        let sandbox = TempDir::new().unwrap();
+        let remote_path = sandbox.path().join("config.git");
+        let remote = Repository::init_bare(&remote_path).unwrap();
+        remote.set_head("refs/heads/main").unwrap();
+        let state_dir = TempDir::new().unwrap();
+        let state = PersistentState::load(state_dir.path()).unwrap();
+        let local_path = sandbox.path().join("local");
+        let local =
+            crate::workspace::create_workspace(local_path.to_str().unwrap(), &state).unwrap();
+        fs::write(local_path.join("README.md"), "# Config baseline\n").unwrap();
+        crate::documents::save_workspace_config(
+            crate::types::SaveWorkspaceConfigRequest {
+                root: local.root.clone(),
+                config: crate::types::WorkspaceConfig {
+                    assets_dir: "media".to_owned(),
+                    ignore_rules: vec!["private/**".to_owned()],
+                },
+                expected_sha256: None,
+                expected_missing: true,
+            },
+            &state,
+        )
+        .unwrap();
+        assert!(state.workspace_changes(&local.root).is_empty());
+
+        let enabled = crate::workspace::enable_git(&local.root, &state).unwrap();
+        Repository::open(&enabled.root)
+            .unwrap()
+            .remote("origin", remote_path.to_str().unwrap())
+            .unwrap();
+        let sync = sync_workspace_changes(&enabled.root, None, &state).unwrap();
+        assert!(sync.pushed);
+
+        let second_state_dir = TempDir::new().unwrap();
+        let second_state = PersistentState::load(second_state_dir.path()).unwrap();
+        let second = crate::workspace::clone_workspace(
+            remote_path.to_str().unwrap(),
+            sandbox.path().join("second").to_str().unwrap(),
+            None,
+            &second_state,
+        )
+        .unwrap();
+        let consumed = crate::documents::read_workspace_config(&second.root).unwrap();
+
+        assert_eq!(consumed.config.assets_dir, "media");
+        assert_eq!(consumed.config.ignore_rules, vec!["private/**"]);
+    }
+
+    #[test]
     fn document_asset_sync_reaches_remote_and_another_real_clone() {
         let sandbox = TempDir::new().unwrap();
         let app_data = TempDir::new().unwrap();
@@ -592,11 +743,13 @@ mod tests {
 
         let opened = crate::documents::read_document(&first.root, "notes/shared.md").unwrap();
         let image_bytes = b"real-image-bytes";
+        let image_source = sandbox.path().join("diagram.png");
+        fs::write(&image_source, image_bytes).unwrap();
         let asset = crate::documents::write_asset(
             &first.root,
             "notes/shared.md",
             "diagram.png",
-            &STANDARD.encode(image_bytes),
+            &image_source,
             None,
             &state,
         )
@@ -1041,28 +1194,26 @@ mod tests {
             local_bytes,
         )
         .unwrap();
-        local_state
-            .record_workspace_change(
-                &local.root,
+        local_state.seed_workspace_changes(
+            &local.root,
+            &[WorkspaceChangeIntent::upsert(
                 "assets/shared.png",
-                crate::types::WorkspaceChangeOperation::Upsert,
-                Some(&hash_bytes(local_bytes)),
-            )
-            .unwrap();
+                hash_bytes(local_bytes),
+            )],
+        );
         let remote_bytes = b"\0remote\xfe";
         fs::write(
             Path::new(&other.root).join("assets/shared.png"),
             remote_bytes,
         )
         .unwrap();
-        other_state
-            .record_workspace_change(
-                &other.root,
+        other_state.seed_workspace_changes(
+            &other.root,
+            &[WorkspaceChangeIntent::upsert(
                 "assets/shared.png",
-                crate::types::WorkspaceChangeOperation::Upsert,
-                Some(&hash_bytes(remote_bytes)),
-            )
-            .unwrap();
+                hash_bytes(remote_bytes),
+            )],
+        );
         assert!(
             sync_workspace_changes(&other.root, None, &other_state)
                 .unwrap()
@@ -1223,14 +1374,10 @@ mod tests {
             "remote",
         );
         push_current_branch(&Repository::open(&other.root).unwrap(), None).unwrap();
-        local_state
-            .record_workspace_change(
-                &local.root,
-                "draft.md",
-                crate::types::WorkspaceChangeOperation::Upsert,
-                Some("newer-save"),
-            )
-            .unwrap();
+        local_state.seed_workspace_changes(
+            &local.root,
+            &[WorkspaceChangeIntent::upsert("draft.md", "newer-save")],
+        );
 
         let result = pull_rebase(&local.root, None, &local_state).unwrap();
         let conflict = result.conflicts.first().unwrap();

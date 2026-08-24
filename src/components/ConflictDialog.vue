@@ -1,9 +1,10 @@
 <script setup lang="ts">
-import { computed } from 'vue'
+import { computed, ref } from 'vue'
 import { useI18n } from 'vue-i18n'
 
 import type { ConflictRecord } from '@/types'
 import ThreeWayConflictResolver from './ThreeWayConflictResolver.vue'
+import { useDialogAccessibility } from '@/composables/useDialogAccessibility'
 
 const props = defineProps<{
   conflicts: ConflictRecord[]
@@ -18,6 +19,7 @@ const emit = defineEmits<{
 }>()
 
 const { t } = useI18n()
+const dialogSurface = ref<HTMLElement>()
 const conflict = computed(() => props.conflicts[0])
 const canMergeText = computed(
   () =>
@@ -26,6 +28,9 @@ const canMergeText = computed(
     conflict.value.localExists &&
     conflict.value.remoteExists,
 )
+useDialogAccessibility(conflict, dialogSurface, () => undefined, {
+  closeOnEscape: false,
+})
 
 function sideText(side: 'local' | 'remote') {
   const current = conflict.value
@@ -39,10 +44,17 @@ function sideText(side: 'local' | 'remote') {
 
 <template>
   <div v-if="conflict" class="modal-backdrop">
-    <section class="dialog comparison-dialog conflict-dialog">
+    <section
+      ref="dialogSurface"
+      class="dialog comparison-dialog conflict-dialog"
+      role="dialog"
+      aria-modal="true"
+      aria-labelledby="conflict-dialog-title"
+      tabindex="-1"
+    >
       <header>
         <div>
-          <h2>{{ $t('app.conflictTitle') }}</h2>
+          <h2 id="conflict-dialog-title">{{ $t('app.conflictTitle') }}</h2>
           <p>{{ conflict.path }} · {{ $t('app.recoveryHint') }}</p>
         </div>
         <button :disabled="syncing" @click="emit('abort')">

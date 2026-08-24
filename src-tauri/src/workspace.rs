@@ -10,11 +10,12 @@ use crate::{
     paths::{canonical_root, path_to_slashes},
     state::PersistentState,
     types::{CredentialRecord, GitBaselinePreview, WorkspaceDescriptor},
+    workspace_operation,
 };
 
 pub fn open_workspace(path: &str, state: &PersistentState) -> AppResult<WorkspaceDescriptor> {
     let root = canonical_root(path)?;
-    let descriptor = descriptor_for_root(&root)?;
+    let descriptor = descriptor_for_root(&root, false)?;
     state.register_workspace(&descriptor.root)?;
     Ok(descriptor)
 }
@@ -24,18 +25,29 @@ pub fn create_workspace(path: &str, state: &PersistentState) -> AppResult<Worksp
     open_workspace(path, state)
 }
 
+#[cfg(test)]
 pub fn clone_workspace(
     remote_url: &str,
     path: &str,
     credential: Option<CredentialRecord>,
     state: &PersistentState,
 ) -> AppResult<WorkspaceDescriptor> {
+    let descriptor = clone_workspace_unregistered(remote_url, path, credential)?;
+    state.register_workspace(&descriptor.root)?;
+    Ok(descriptor)
+}
+
+pub(crate) fn clone_workspace_unregistered(
+    remote_url: &str,
+    path: &str,
+    credential: Option<CredentialRecord>,
+) -> AppResult<WorkspaceDescriptor> {
     git::clone_repository(remote_url, path, credential)?;
-    open_workspace(path, state)
+    descriptor_for_root(&canonical_root(path)?, true)
 }
 
 pub fn refresh_workspace(root: &str) -> AppResult<WorkspaceDescriptor> {
-    descriptor_for_root(&canonical_root(root)?)
+    descriptor_for_root(&canonical_root(root)?, true)
 }
 
 pub fn preview_git_baseline(root: &str) -> AppResult<GitBaselinePreview> {
@@ -44,20 +56,14 @@ pub fn preview_git_baseline(root: &str) -> AppResult<GitBaselinePreview> {
             "Version management is already enabled for this workspace.".to_owned(),
         ));
     }
-    let mut visible = BTreeSet::new();
+    let mut versioned = BTreeSet::new();
     let mut total_bytes = 0u64;
-    documents::scan_workspace_files(
-        root,
-        || true,
-        |entry, relative| {
-            visible.insert(relative.to_owned());
-            let metadata = entry
-                .metadata()
-                .map_err(|error| AppError::Io(error.into()))?;
-            total_bytes = total_bytes.saturating_add(metadata.len());
-            Ok(true)
-        },
-    )?;
+    documents::scan_versioned_workspace_files(root, |path, relative| {
+        versioned.insert(relative.to_owned());
+        let metadata = path.metadata()?;
+        total_bytes = total_bytes.saturating_add(metadata.len());
+        Ok(())
+    })?;
     let root_path = canonical_root(root)?;
     let mut ignored_count = 0usize;
     for entry in WalkDir::new(&root_path).follow_links(false) {
@@ -70,39 +76,34 @@ pub fn preview_git_baseline(root: &str) -> AppResult<GitBaselinePreview> {
             .strip_prefix(&root_path)
             .map(path_to_slashes)
             .map_err(|_| AppError::InvalidPath(entry.path().display().to_string()))?;
-        let internal = relative
-            .split('/')
-            .any(|part| matches!(part, ".git" | ".marktree"));
-        if !internal && !visible.contains(&relative) {
+        let internal = relative.split('/').any(|part| {
+            part.eq_ignore_ascii_case(".git") || part.eq_ignore_ascii_case(".marktree")
+        });
+        if !internal && !versioned.contains(&relative) {
             ignored_count = ignored_count.saturating_add(1);
         }
     }
     let config = documents::read_workspace_config(root)?.config;
     Ok(GitBaselinePreview {
-        file_count: visible.len(),
+        file_count: versioned.len(),
         total_bytes,
         ignored_count,
         ignore_rules: config.ignore_rules,
     })
 }
 
-pub fn enable_git(root: &str) -> AppResult<WorkspaceDescriptor> {
+pub fn enable_git(root: &str, state: &PersistentState) -> AppResult<WorkspaceDescriptor> {
     let preview = preview_git_baseline(root)?;
-    git::initialize_repository(root)?;
     let mut paths = Vec::with_capacity(preview.file_count);
-    documents::scan_workspace_files(
-        root,
-        || true,
-        |_entry, relative| {
-            paths.push(relative.to_owned());
-            Ok(true)
-        },
-    )?;
-    git::commit_workspace_baseline(root, &paths)?;
+    documents::scan_versioned_workspace_files(root, |_path, relative| {
+        paths.push(relative.to_owned());
+        Ok(())
+    })?;
+    workspace_operation::enable_git(root, paths, state)?;
     refresh_workspace(root)
 }
 
-fn descriptor_for_root(root: &Path) -> AppResult<WorkspaceDescriptor> {
+fn descriptor_for_root(root: &Path, include_status: bool) -> AppResult<WorkspaceDescriptor> {
     let root_string = root.to_string_lossy().into_owned();
     let id = hash_bytes(normalized_identity(&root_string).as_bytes())[..16].to_owned();
     let name = root
@@ -114,7 +115,11 @@ fn descriptor_for_root(root: &Path) -> AppResult<WorkspaceDescriptor> {
         id,
         name,
         root: root_string.clone(),
-        git: git::git_capability(&root_string)?,
+        git: if include_status {
+            git::git_capability(&root_string)?
+        } else {
+            git::git_capability_metadata(&root_string)?
+        },
     })
 }
 
@@ -184,7 +189,7 @@ mod tests {
     }
 
     #[test]
-    fn enabling_git_creates_a_complete_visible_baseline_and_tracks_later_moves() {
+    fn enabling_git_creates_a_complete_versioned_baseline_and_tracks_later_moves() {
         let directory = TempDir::new().unwrap();
         let app_data = TempDir::new().unwrap();
         let state = PersistentState::load(app_data.path()).unwrap();
@@ -200,7 +205,7 @@ mod tests {
         let preview = preview_git_baseline(&root).unwrap();
         assert_eq!(preview.file_count, 1);
         assert_eq!(preview.ignored_count, 1);
-        let descriptor = enable_git(&root).unwrap();
+        let descriptor = enable_git(&root, &state).unwrap();
         assert!(descriptor.git.is_some());
         let repository = Repository::open(&root).unwrap();
         let baseline = repository.head().unwrap().peel_to_commit().unwrap();
@@ -215,7 +220,7 @@ mod tests {
             .get_path(Path::new("target/ignored.txt"))
             .is_err());
 
-        documents::create_folder(&root, "archive").unwrap();
+        documents::create_folder(&root, "archive", &state).unwrap();
         documents::move_entry(&root, "note.md", "archive/note.md", &state).unwrap();
         let changes = state.workspace_changes(&root);
         assert!(changes.iter().any(|change| {

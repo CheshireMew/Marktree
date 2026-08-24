@@ -8,7 +8,9 @@ use chrono::Utc;
 use git2::{Oid, Repository, RepositoryState};
 use serde::{Deserialize, Serialize};
 
-use super::repository::{fast_forward, signature, upstream_commit, workdir_string};
+use super::repository::{
+    fast_forward, open_exact_repository, signature, upstream_commit, workdir_string,
+};
 use crate::{
     error::{AppError, AppResult},
     file_version::hash_bytes,
@@ -95,7 +97,7 @@ pub fn pending_conflicts(
     root: &str,
     app_state: &PersistentState,
 ) -> AppResult<Vec<ConflictRecord>> {
-    let repo = Repository::open(root)?;
+    let repo = open_exact_repository(root)?;
     if !repo.index()?.has_conflicts() {
         return Ok(Vec::new());
     }
@@ -148,7 +150,7 @@ pub(super) fn capture_conflicts(
     let index = repo.index()?;
     let recovery_root = app_state.recovery_dir()?;
     let root = workdir_string(repo)?;
-    let operation = app_state.pending_git_operation(&root).ok_or_else(|| {
+    let operation = app_state.try_pending_git_operation(&root)?.ok_or_else(|| {
         AppError::Message(
             "Git reported conflicts without a persisted Marktree operation.".to_owned(),
         )
@@ -395,7 +397,7 @@ fn recovery_record(
 }
 
 fn stage_resolved_content(root: &str, relative: &str, content: &[u8]) -> AppResult<()> {
-    let repo = Repository::open(root)?;
+    let repo = open_exact_repository(root)?;
     let root_path = canonical_root(workdir_string(&repo)?.as_str())?;
     let destination = resolve_for_write(&root_path, relative)?;
     if let Some(parent) = destination.parent() {
@@ -414,7 +416,7 @@ fn stage_resolved_content(root: &str, relative: &str, content: &[u8]) -> AppResu
 }
 
 fn stage_resolved_deletion(root: &str, relative: &str) -> AppResult<()> {
-    let repo = Repository::open(root)?;
+    let repo = open_exact_repository(root)?;
     let root_path = canonical_root(workdir_string(&repo)?.as_str())?;
     let destination = resolve_for_write(&root_path, relative)?;
     if destination.exists() {

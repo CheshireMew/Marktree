@@ -13,12 +13,15 @@ export type WorkspaceDiffMode =
 
 export interface WorkspaceDiffResult extends Omit<DiffResult, 'mode'> {
   mode: WorkspaceDiffMode
+  truncated: boolean
+  omittedLines: number
 }
 
 export interface EditorTab extends DocumentContent {
   root: string
   title: string
-  diskContent: string
+  /** Kept only for ordinary documents; large documents read the disk baseline on demand. */
+  diskContent?: string
   revision: number
   savedRevision: number
   dirty: boolean
@@ -39,8 +42,43 @@ export interface UnsavedComparison {
 
 export type WorkspaceImageLoader = (root: string, path: string) => Promise<string>
 
-export interface WorkspaceImagePreview {
+export interface WorkspaceFilePreviewState {
   root: string
   path: string
   url: string
+  kind: import('@/generated/native').DocumentKind
+  mediaType: string
 }
+
+export type CommandPaletteAction =
+  | 'newDocument'
+  | 'newFolder'
+  | 'refresh'
+  | 'settings'
+  | 'sync'
+  | 'snippets'
+  | 'addWorkspace'
+
+export type CommandPaletteItem =
+  | {
+      key: string
+      kind: 'command'
+      action: CommandPaletteAction
+      title: string
+      detail: string
+    }
+  | {
+      key: string
+      kind: 'document'
+      title: string
+      detail: string
+      result: import('@/generated/native').WorktreeSearchResult
+    }
+  | {
+      key: string
+      kind: 'workspace'
+      title: string
+      detail: string
+      workspaceId: string
+      worktreeRoot?: string
+    }

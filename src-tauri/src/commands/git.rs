@@ -1,303 +1,347 @@
-use tauri::State;
+use tauri::{AppHandle, Manager, WebviewWindow};
 
 use crate::{
     error::AppResult,
     git,
     state::{PersistentState, WorkspaceRuntime},
     types::{
-        BranchDescriptor, ConflictChoice, ConflictRecord, CreateWorktreeRequest, DiffMode,
-        DiffResult, GitStatusSnapshot, PendingGitOperation, SyncPlan, SyncResult, TextComparison,
-        WorktreeDescriptor, WorktreeSearchResult,
+        BranchDescriptor, ConflictChoice, CreateWorktreeRequest, DiffMode, DiffResult,
+        GitStatusSnapshot, PendingGitOperationSummary, SyncPlan, SyncResult, TextComparison,
+        WorkspaceViewSnapshot, WorktreeDescriptor, WorktreeSearchRequest, WorktreeSearchResponse,
     },
+    workspace_service::WorkspaceService,
 };
 
 use super::support::{
-    credential_for_root, ensure_git_idle_for_root, ensure_worktree_idle, with_sync_credential,
-    with_two_workspace_locks, with_workspace_lock,
+    ensure_git_idle_for_root, ensure_worktree_idle, run_blocking, with_sync_credential,
 };
 
-#[tauri::command(async)]
-pub fn workspace_git_status(
-    root: String,
-    runtime: State<'_, WorkspaceRuntime>,
-) -> AppResult<GitStatusSnapshot> {
-    with_workspace_lock(&runtime, &root, || git::repository_status(&root))
+fn in_workspace<T>(
+    app: &AppHandle,
+    root: &str,
+    operation: impl FnOnce(&PersistentState) -> AppResult<T>,
+) -> AppResult<T> {
+    let state = app.state::<PersistentState>();
+    let runtime = app.state::<WorkspaceRuntime>();
+    WorkspaceService::new(&state, &runtime).run(root, || operation(&state))
 }
 
-#[tauri::command(async)]
-pub fn list_branches(
-    root: String,
-    runtime: State<'_, WorkspaceRuntime>,
-) -> AppResult<Vec<BranchDescriptor>> {
-    with_workspace_lock(&runtime, &root, || git::list_branches(&root))
+fn in_two_workspaces<T>(
+    app: &AppHandle,
+    left_root: &str,
+    right_root: &str,
+    operation: impl FnOnce() -> AppResult<T>,
+) -> AppResult<T> {
+    let state = app.state::<PersistentState>();
+    let runtime = app.state::<WorkspaceRuntime>();
+    WorkspaceService::new(&state, &runtime).run_two(left_root, right_root, operation)
 }
 
-#[tauri::command(async)]
-pub fn create_branch(
+fn view_from_status(
+    app: &AppHandle,
+    root: &str,
+    status: GitStatusSnapshot,
+) -> AppResult<WorkspaceViewSnapshot> {
+    let state = app.state::<PersistentState>();
+    let runtime = app.state::<WorkspaceRuntime>();
+    WorkspaceService::new(&state, &runtime).workspace_view_from_status(root, Some(status))
+}
+
+#[tauri::command]
+pub async fn create_branch(
     root: String,
     name: String,
     start_point: Option<String>,
     checkout: bool,
-    state: State<'_, PersistentState>,
-    runtime: State<'_, WorkspaceRuntime>,
-) -> AppResult<GitStatusSnapshot> {
-    with_workspace_lock(&runtime, &root, || {
-        ensure_git_idle_for_root(&state, &root, None)?;
-        git::create_branch(&root, &name, start_point.as_deref(), checkout)
-    })
-}
-
-#[tauri::command(async)]
-pub fn checkout_branch(
-    root: String,
-    name: String,
-    state: State<'_, PersistentState>,
-    runtime: State<'_, WorkspaceRuntime>,
-) -> AppResult<GitStatusSnapshot> {
-    with_workspace_lock(&runtime, &root, || {
-        ensure_git_idle_for_root(&state, &root, None)?;
-        git::checkout_branch(&root, &name)
-    })
-}
-
-#[tauri::command(async)]
-pub fn delete_branch(
-    root: String,
-    name: String,
-    state: State<'_, PersistentState>,
-    runtime: State<'_, WorkspaceRuntime>,
-) -> AppResult<Vec<BranchDescriptor>> {
-    with_workspace_lock(&runtime, &root, || {
-        ensure_git_idle_for_root(&state, &root, None)?;
-        git::delete_branch(&root, &name)
-    })
-}
-
-#[tauri::command(async)]
-pub fn create_worktree(
-    request: CreateWorktreeRequest,
-    state: State<'_, PersistentState>,
-    runtime: State<'_, WorkspaceRuntime>,
-) -> AppResult<WorktreeDescriptor> {
-    let root = request.root.clone();
-    with_workspace_lock(&runtime, &root, || {
-        ensure_git_idle_for_root(&state, &root, None)?;
-        git::create_worktree(request)
-    })
-}
-
-#[tauri::command(async)]
-pub fn search_worktrees(
-    root: String,
-    query: String,
-    limit: usize,
-    runtime: State<'_, WorkspaceRuntime>,
-) -> AppResult<Vec<WorktreeSearchResult>> {
-    let key = git::repository_lock_key(&root);
-    let generation = runtime.begin_search(&key);
-    git::search_worktrees(&root, &query, limit.min(500), || {
-        runtime.is_search_current(&key, generation)
-    })
-}
-
-#[tauri::command(async)]
-pub fn stage_paths(
-    root: String,
-    paths: Vec<String>,
-    state: State<'_, PersistentState>,
-    runtime: State<'_, WorkspaceRuntime>,
-) -> AppResult<GitStatusSnapshot> {
-    with_workspace_lock(&runtime, &root, || {
-        ensure_worktree_idle(&state, &root)?;
-        git::stage_paths(&root, &paths)
-    })
-}
-
-#[tauri::command(async)]
-pub fn stage_all(
-    root: String,
-    state: State<'_, PersistentState>,
-    runtime: State<'_, WorkspaceRuntime>,
-) -> AppResult<GitStatusSnapshot> {
-    with_workspace_lock(&runtime, &root, || {
-        ensure_worktree_idle(&state, &root)?;
-        git::stage_all(&root)
-    })
-}
-
-#[tauri::command(async)]
-pub fn unstage_paths(
-    root: String,
-    paths: Vec<String>,
-    state: State<'_, PersistentState>,
-    runtime: State<'_, WorkspaceRuntime>,
-) -> AppResult<GitStatusSnapshot> {
-    with_workspace_lock(&runtime, &root, || {
-        ensure_worktree_idle(&state, &root)?;
-        git::unstage_paths(&root, &paths)
-    })
-}
-
-#[tauri::command(async)]
-pub fn commit(
-    root: String,
-    message: String,
-    state: State<'_, PersistentState>,
-    runtime: State<'_, WorkspaceRuntime>,
-) -> AppResult<String> {
-    with_workspace_lock(&runtime, &root, || {
-        ensure_worktree_idle(&state, &root)?;
-        git::commit(&root, &message)
-    })
-}
-
-#[tauri::command(async)]
-pub fn fetch(
-    root: String,
-    state: State<'_, PersistentState>,
-    runtime: State<'_, WorkspaceRuntime>,
-) -> AppResult<GitStatusSnapshot> {
-    let credential = credential_for_root(&root, &state)?;
-    with_workspace_lock(&runtime, &root, || {
-        ensure_git_idle_for_root(&state, &root, None)?;
-        git::fetch(&root, credential)
-    })
-}
-
-#[tauri::command(async)]
-pub fn pull_rebase(
-    root: String,
-    state: State<'_, PersistentState>,
-    runtime: State<'_, WorkspaceRuntime>,
-) -> AppResult<SyncResult> {
-    with_sync_credential(&root, &state, |credential| {
-        with_workspace_lock(&runtime, &root, || {
-            ensure_git_idle_for_root(&state, &root, Some(&root))?;
-            git::pull_rebase(&root, credential, &state)
+    app: AppHandle,
+) -> AppResult<WorkspaceViewSnapshot> {
+    run_blocking(move || {
+        in_workspace(&app, &root, |state| {
+            ensure_git_idle_for_root(state, &root, None)?;
+            let status = git::create_branch(&root, &name, start_point.as_deref(), checkout)?;
+            view_from_status(&app, &root, status)
         })
     })
+    .await
 }
 
-#[tauri::command(async)]
-pub fn push(
+#[tauri::command]
+pub async fn checkout_branch(
     root: String,
-    state: State<'_, PersistentState>,
-    runtime: State<'_, WorkspaceRuntime>,
-) -> AppResult<GitStatusSnapshot> {
-    let credential = credential_for_root(&root, &state)?;
-    with_workspace_lock(&runtime, &root, || {
-        ensure_git_idle_for_root(&state, &root, None)?;
-        git::push(&root, credential)
+    name: String,
+    app: AppHandle,
+) -> AppResult<WorkspaceViewSnapshot> {
+    run_blocking(move || {
+        in_workspace(&app, &root, |state| {
+            ensure_git_idle_for_root(state, &root, None)?;
+            let status = git::checkout_branch(&root, &name)?;
+            view_from_status(&app, &root, status)
+        })
     })
+    .await
 }
 
-#[tauri::command(async)]
-pub fn git_diff(
+#[tauri::command]
+pub async fn delete_branch(
     root: String,
-    mode: DiffMode,
-    runtime: State<'_, WorkspaceRuntime>,
-) -> AppResult<DiffResult> {
-    with_workspace_lock(&runtime, &root, || git::diff(&root, mode))
+    name: String,
+    app: AppHandle,
+) -> AppResult<Vec<BranchDescriptor>> {
+    run_blocking(move || {
+        in_workspace(&app, &root, |state| {
+            ensure_git_idle_for_root(state, &root, None)?;
+            git::delete_branch(&root, &name)
+        })
+    })
+    .await
 }
 
-#[tauri::command(async)]
-pub fn compare_worktrees(
+#[tauri::command]
+pub async fn create_worktree(
+    request: CreateWorktreeRequest,
+    app: AppHandle,
+) -> AppResult<WorktreeDescriptor> {
+    let root = request.root.clone();
+    run_blocking(move || {
+        in_workspace(&app, &root, |state| {
+            ensure_git_idle_for_root(state, &root, None)?;
+            git::create_worktree(request)
+        })
+    })
+    .await
+}
+
+#[tauri::command]
+pub async fn search_worktrees(
+    request: WorktreeSearchRequest,
+    window: WebviewWindow,
+) -> AppResult<WorktreeSearchResponse> {
+    let client_id = window.label().to_owned();
+    let app = window.app_handle().clone();
+    run_blocking(move || {
+        crate::paths::canonical_root(&request.root)?;
+        let runtime = app.state::<WorkspaceRuntime>();
+        let key = git::repository_lock_key(&request.root);
+        let search = runtime.search_session(&key, &client_id);
+        let result = git::search_worktrees(
+            &request.root,
+            &request.query,
+            request.limit.min(crate::state::MAX_SEARCH_RESULTS),
+            request.path_prefix.as_deref(),
+            &request.file_kinds,
+            request.modified_after_ms,
+            || search.is_current(),
+        );
+        result
+    })
+    .await
+}
+
+#[tauri::command]
+pub async fn stage_paths(
+    root: String,
+    paths: Vec<String>,
+    app: AppHandle,
+) -> AppResult<WorkspaceViewSnapshot> {
+    run_blocking(move || {
+        in_workspace(&app, &root, |state| {
+            ensure_worktree_idle(state, &root)?;
+            let status = git::stage_paths(&root, &paths)?;
+            view_from_status(&app, &root, status)
+        })
+    })
+    .await
+}
+
+#[tauri::command]
+pub async fn stage_all(root: String, app: AppHandle) -> AppResult<WorkspaceViewSnapshot> {
+    run_blocking(move || {
+        in_workspace(&app, &root, |state| {
+            ensure_worktree_idle(state, &root)?;
+            let status = git::stage_all(&root)?;
+            view_from_status(&app, &root, status)
+        })
+    })
+    .await
+}
+
+#[tauri::command]
+pub async fn unstage_paths(
+    root: String,
+    paths: Vec<String>,
+    app: AppHandle,
+) -> AppResult<WorkspaceViewSnapshot> {
+    run_blocking(move || {
+        in_workspace(&app, &root, |state| {
+            ensure_worktree_idle(state, &root)?;
+            let status = git::unstage_paths(&root, &paths)?;
+            view_from_status(&app, &root, status)
+        })
+    })
+    .await
+}
+
+#[tauri::command]
+pub async fn commit(
+    root: String,
+    message: String,
+    app: AppHandle,
+) -> AppResult<WorkspaceViewSnapshot> {
+    run_blocking(move || {
+        in_workspace(&app, &root, |state| {
+            ensure_worktree_idle(state, &root)?;
+            git::commit(&root, &message)?;
+            let status = git::repository_status(&root)?;
+            view_from_status(&app, &root, status)
+        })
+    })
+    .await
+}
+
+#[tauri::command]
+pub async fn fetch(root: String, app: AppHandle) -> AppResult<()> {
+    run_blocking(move || {
+        let state = app.state::<PersistentState>();
+        let credential = crate::auth::credential_for_workspace(&root, &state)?;
+        in_workspace(&app, &root, |state| {
+            ensure_git_idle_for_root(state, &root, None)?;
+            git::fetch(&root, credential)
+        })
+    })
+    .await
+}
+
+#[tauri::command]
+pub async fn pull_rebase(root: String, app: AppHandle) -> AppResult<SyncResult> {
+    run_blocking(move || {
+        let state = app.state::<PersistentState>();
+        with_sync_credential(&root, &state, |credential| {
+            in_workspace(&app, &root, |state| {
+                ensure_git_idle_for_root(state, &root, Some(&root))?;
+                git::pull_rebase(&root, credential, state)
+            })
+        })
+    })
+    .await
+}
+
+#[tauri::command]
+pub async fn push(root: String, app: AppHandle) -> AppResult<()> {
+    run_blocking(move || {
+        let state = app.state::<PersistentState>();
+        let credential = crate::auth::credential_for_workspace(&root, &state)?;
+        in_workspace(&app, &root, |state| {
+            ensure_git_idle_for_root(state, &root, None)?;
+            git::push(&root, credential)
+        })
+    })
+    .await
+}
+
+#[tauri::command]
+pub async fn git_diff(root: String, mode: DiffMode, app: AppHandle) -> AppResult<DiffResult> {
+    run_blocking(move || in_workspace(&app, &root, |_| git::diff(&root, mode))).await
+}
+
+#[tauri::command]
+pub async fn compare_worktrees(
     left_root: String,
     right_root: String,
     path: String,
-    runtime: State<'_, WorkspaceRuntime>,
+    app: AppHandle,
 ) -> AppResult<TextComparison> {
-    with_two_workspace_locks(&runtime, &left_root, &right_root, || {
-        git::compare_worktrees(&left_root, &right_root, &path)
-    })
-}
-
-#[tauri::command(async)]
-pub fn sync_plan(
-    root: String,
-    state: State<'_, PersistentState>,
-    runtime: State<'_, WorkspaceRuntime>,
-) -> AppResult<SyncPlan> {
-    with_workspace_lock(&runtime, &root, || git::sync_plan(&root, &state))
-}
-
-#[tauri::command(async)]
-pub fn sync_workspace_changes(
-    root: String,
-    state: State<'_, PersistentState>,
-    runtime: State<'_, WorkspaceRuntime>,
-) -> AppResult<SyncResult> {
-    with_sync_credential(&root, &state, |credential| {
-        with_workspace_lock(&runtime, &root, || {
-            ensure_git_idle_for_root(&state, &root, Some(&root))?;
-            git::sync_workspace_changes(&root, credential, &state)
+    run_blocking(move || {
+        in_two_workspaces(&app, &left_root, &right_root, || {
+            git::compare_worktrees(&left_root, &right_root, &path)
         })
     })
+    .await
 }
 
-#[tauri::command(async)]
-pub fn resolve_conflict(
+#[tauri::command]
+pub async fn sync_plan(root: String, app: AppHandle) -> AppResult<SyncPlan> {
+    run_blocking(move || {
+        let state = app.state::<PersistentState>();
+        let runtime = app.state::<WorkspaceRuntime>();
+        WorkspaceService::new(&state, &runtime).sync_plan(&root)
+    })
+    .await
+}
+
+#[tauri::command]
+pub async fn sync_workspace_changes(root: String, app: AppHandle) -> AppResult<SyncResult> {
+    run_blocking(move || {
+        let state = app.state::<PersistentState>();
+        let runtime = app.state::<WorkspaceRuntime>();
+        with_sync_credential(&root, &state, |credential| {
+            WorkspaceService::new(&state, &runtime).sync_with_credential(&root, credential)
+        })
+    })
+    .await
+}
+
+#[tauri::command]
+pub async fn resolve_conflict(
     root: String,
     path: String,
     recovery_id: String,
     choice: ConflictChoice,
-    state: State<'_, PersistentState>,
-    runtime: State<'_, WorkspaceRuntime>,
+    app: AppHandle,
 ) -> AppResult<()> {
-    with_workspace_lock(&runtime, &root, || {
-        git::resolve_conflict(&root, &path, &recovery_id, choice, &state)
+    run_blocking(move || {
+        in_workspace(&app, &root, |state| {
+            git::resolve_conflict(&root, &path, &recovery_id, choice, state)
+        })
     })
+    .await
 }
 
-#[tauri::command(async)]
-pub fn resolve_conflict_with_content(
+#[tauri::command]
+pub async fn resolve_conflict_with_content(
     root: String,
     path: String,
     recovery_id: String,
     content: String,
-    state: State<'_, PersistentState>,
-    runtime: State<'_, WorkspaceRuntime>,
+    app: AppHandle,
 ) -> AppResult<()> {
-    with_workspace_lock(&runtime, &root, || {
-        git::resolve_conflict_with_content(&root, &path, &recovery_id, &content, &state)
-    })
-}
-
-#[tauri::command(async)]
-pub fn pending_conflicts(
-    root: String,
-    state: State<'_, PersistentState>,
-    runtime: State<'_, WorkspaceRuntime>,
-) -> AppResult<Vec<ConflictRecord>> {
-    with_workspace_lock(&runtime, &root, || git::pending_conflicts(&root, &state))
-}
-
-#[tauri::command(async)]
-pub fn pending_git_operation(
-    root: String,
-    state: State<'_, PersistentState>,
-) -> Option<PendingGitOperation> {
-    git::pending_git_operation(&root, &state)
-}
-
-#[tauri::command(async)]
-pub fn resume_git_operation(
-    root: String,
-    state: State<'_, PersistentState>,
-    runtime: State<'_, WorkspaceRuntime>,
-) -> AppResult<SyncResult> {
-    with_sync_credential(&root, &state, |credential| {
-        with_workspace_lock(&runtime, &root, || {
-            git::resume_git_operation(&root, credential, &state)
+    run_blocking(move || {
+        in_workspace(&app, &root, |state| {
+            git::resolve_conflict_with_content(&root, &path, &recovery_id, &content, state)
         })
     })
+    .await
 }
 
-#[tauri::command(async)]
-pub fn abort_git_operation(
+#[tauri::command]
+pub async fn pending_git_operation(
     root: String,
-    state: State<'_, PersistentState>,
-    runtime: State<'_, WorkspaceRuntime>,
-) -> AppResult<GitStatusSnapshot> {
-    with_workspace_lock(&runtime, &root, || git::abort_git_operation(&root, &state))
+    app: AppHandle,
+) -> AppResult<Option<PendingGitOperationSummary>> {
+    run_blocking(move || {
+        Ok(
+            git::pending_git_operation(&root, &app.state::<PersistentState>())?
+                .as_ref()
+                .map(PendingGitOperationSummary::from),
+        )
+    })
+    .await
+}
+
+#[tauri::command]
+pub async fn resume_git_operation(root: String, app: AppHandle) -> AppResult<SyncResult> {
+    run_blocking(move || {
+        let state = app.state::<PersistentState>();
+        with_sync_credential(&root, &state, |credential| {
+            in_workspace(&app, &root, |state| {
+                git::resume_git_operation(&root, credential, state)
+            })
+        })
+    })
+    .await
+}
+
+#[tauri::command]
+pub async fn abort_git_operation(root: String, app: AppHandle) -> AppResult<GitStatusSnapshot> {
+    run_blocking(move || in_workspace(&app, &root, |state| git::abort_git_operation(&root, state)))
+        .await
 }

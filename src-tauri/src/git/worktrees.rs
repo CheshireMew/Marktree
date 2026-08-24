@@ -8,16 +8,17 @@ use crate::{
     error::{AppError, AppResult},
     types::{
         BranchDescriptor, CreateWorktreeRequest, GitStatusSnapshot, WorktreeDescriptor,
-        WorktreeSearchResult,
+        WorktreeSearchResponse, WorktreeSearchResult,
     },
 };
 
 use super::repository::{
-    current_branch, descriptor_for_worktree, main_repository, status_snapshot, workdir_string,
+    current_branch, descriptor_for_worktree, main_repository, open_exact_repository,
+    open_exact_repository_path, status_snapshot, workdir_string,
 };
 
 pub fn list_branches(root: &str) -> AppResult<Vec<BranchDescriptor>> {
-    let repo = Repository::open(root)?;
+    let repo = open_exact_repository(root)?;
     let mut branches = Vec::new();
     for item in repo.branches(Some(BranchType::Local))? {
         let (branch, _) = item?;
@@ -59,7 +60,7 @@ pub fn create_branch(
     checkout: bool,
 ) -> AppResult<GitStatusSnapshot> {
     validate_branch_name(name)?;
-    let repo = Repository::open(root)?;
+    let repo = open_exact_repository(root)?;
     if repo.find_branch(name, BranchType::Local).is_ok() {
         return Err(AppError::Message(format!(
             "The branch '{name}' already exists."
@@ -87,14 +88,14 @@ pub fn create_branch(
 
 pub fn checkout_branch(root: &str, name: &str) -> AppResult<GitStatusSnapshot> {
     validate_branch_name(name)?;
-    let repo = Repository::open(root)?;
+    let repo = open_exact_repository(root)?;
     checkout_branch_in_repository(&repo, name)?;
     status_snapshot(&repo)
 }
 
 pub fn delete_branch(root: &str, name: &str) -> AppResult<Vec<BranchDescriptor>> {
     validate_branch_name(name)?;
-    let repo = Repository::open(root)?;
+    let repo = open_exact_repository(root)?;
     if let Some(path) = checked_out_branch_path(&repo, name)? {
         return Err(AppError::Message(format!(
             "The branch '{name}' is checked out at {path}."
@@ -107,7 +108,7 @@ pub fn delete_branch(root: &str, name: &str) -> AppResult<Vec<BranchDescriptor>>
 
 pub fn create_worktree(request: CreateWorktreeRequest) -> AppResult<WorktreeDescriptor> {
     validate_worktree_name(&request.name)?;
-    let repo = main_repository(&Repository::open(&request.root)?)?;
+    let repo = main_repository(&open_exact_repository(&request.root)?)?;
     let path = PathBuf::from(&request.path);
     if path.exists() {
         return Err(AppError::Message(
@@ -149,9 +150,13 @@ pub fn search_worktrees(
     root: &str,
     query: &str,
     limit: usize,
+    path_prefix: Option<&str>,
+    file_kinds: &[crate::types::DocumentKind],
+    modified_after_ms: Option<u64>,
     is_current: impl Fn() -> bool,
-) -> AppResult<Vec<WorktreeSearchResult>> {
-    let repo = main_repository(&Repository::open(root)?)?;
+) -> AppResult<WorktreeSearchResponse> {
+    let repo = main_repository(&open_exact_repository(root)?)?;
+    let mut budget = crate::documents::SearchBudget::default();
     let mut worktrees = vec![("main".to_owned(), workdir_string(&repo)?)];
     let names = repo.worktrees()?;
     for item in names.iter() {
@@ -171,23 +176,44 @@ pub fn search_worktrees(
         if !is_current() {
             break;
         }
-        for path in crate::documents::search_documents(
+        for result in crate::documents::search_documents_filtered_with_budget(
             &worktree_root,
-            query,
-            limit.saturating_sub(results.len()).max(1),
+            crate::documents::SearchCriteria {
+                query,
+                limit: limit.saturating_sub(results.len()).max(1),
+                path_prefix,
+                file_kinds,
+                modified_after_ms,
+            },
             &is_current,
+            &mut budget,
         )? {
             results.push(WorktreeSearchResult {
                 worktree: worktree.clone(),
                 root: worktree_root.clone(),
-                path,
+                path: result.path,
+                line: result.line,
+                column: result.column,
+                snippet: result.snippet,
+                match_type: result.match_type,
+                file_kind: result.file_kind,
+                modified_ms: result.modified_ms,
             });
             if results.len() >= limit.max(1) {
-                return Ok(results);
+                return Ok(WorktreeSearchResponse {
+                    results,
+                    statistics: budget.statistics(),
+                });
             }
         }
+        if budget.statistics().truncated {
+            break;
+        }
     }
-    Ok(results)
+    Ok(WorktreeSearchResponse {
+        results,
+        statistics: budget.statistics(),
+    })
 }
 
 fn checkout_branch_in_repository(repo: &Repository, name: &str) -> AppResult<()> {
@@ -232,7 +258,7 @@ fn checked_out_branch_path(repo: &Repository, name: &str) -> AppResult<Option<St
             continue;
         };
         let worktree = main.find_worktree(worktree_name)?;
-        let Ok(worktree_repo) = Repository::open(worktree.path()) else {
+        let Ok(worktree_repo) = open_exact_repository_path(worktree.path()) else {
             continue;
         };
         if current_branch(&worktree_repo).as_deref() == Some(name) {

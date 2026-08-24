@@ -1,5 +1,4 @@
 import { EditorView, WidgetType } from '@codemirror/view'
-import katex from 'katex'
 
 import { i18n } from '@/i18n'
 import type { WorkspaceImageLoader } from '@/types'
@@ -9,6 +8,15 @@ export type ResolvedImageSource =
   | { kind: 'workspace'; key: string; root: string; path: string }
 
 let mermaidLoader: Promise<typeof import('mermaid')> | undefined
+let katexLoader: Promise<typeof import('katex')> | undefined
+
+function loadKatex() {
+  katexLoader ??= Promise.all([
+    import('katex'),
+    import('katex/dist/katex.min.css'),
+  ]).then(([module]) => module)
+  return katexLoader
+}
 
 function loadMermaid() {
   mermaidLoader ??= import('mermaid').then((module) => {
@@ -35,15 +43,17 @@ export class MathWidget extends WidgetType {
   toDOM() {
     const element = document.createElement(this.displayMode ? 'div' : 'span')
     element.className = this.displayMode ? 'cm-math-block' : 'cm-math-inline'
-    try {
-      katex.render(this.source, element, {
-        displayMode: this.displayMode,
-        throwOnError: false,
-        strict: false,
+    element.textContent = this.source
+    void loadKatex()
+      .then((module) => {
+        if (!element.isConnected) return
+        module.default.render(this.source, element, {
+          displayMode: this.displayMode,
+          throwOnError: false,
+          strict: false,
+        })
       })
-    } catch {
-      element.textContent = this.source
-    }
+      .catch(() => undefined)
     return element
   }
 }

@@ -1,0 +1,20 @@
+{
+  "current": {
+    "spdx": "AGPL-3.0-or-later",
+    "licenseFile": "LICENSE",
+    "noticeFile": "LICENSE-NOTICE.md"
+  },
+  "historicalGrants": [
+    {
+      "spdx": "GPL-3.0-or-later",
+      "lastCommit": "157b713f9730b71ad0c13e123b19486b60ab843a",
+      "licenseFile": "licenses/history/LICENSE-GPL-3.0-or-later-THROUGH-157b713f.txt",
+      "noticeFile": "licenses/history/LICENSING-GPL-3.0-or-later-THROUGH-157b713f.md"
+    },
+    {
+      "spdx": "MIT",
+      "lastCommit": "97f3675fd124f81513721f7d044001d19c010486",
+      "licenseFile": "LICENSE-MIT-HISTORICAL"
+    }
+  ]
+}

@@ -1,16 +1,24 @@
 [package]
 name = "marktree"
 version = "0.1.0"
+default-run = "marktree"
 description = "A source-faithful local Markdown and text workspace with optional Git"
 authors = ["Marktree contributors"]
-license = "MIT"
+license = "AGPL-3.0-or-later"
 repository = "https://github.com/CheshireMew/Marktree"
 edition = "2021"
 rust-version = "1.88"
 
+[features]
+test-local-remotes = []
+
 [lib]
 name = "marktree_lib"
 crate-type = ["staticlib", "cdylib", "rlib"]
+
+[[bin]]
+name = "marktree-cli"
+path = "src/bin/marktree-cli.rs"
 
 [build-dependencies]
 tauri-build = { version = "2.5.6", features = [] }
@@ -18,6 +26,8 @@ tauri-build = { version = "2.5.6", features = [] }
 [dependencies]
 base64 = "0.22"
 chrono = { version = "0.4", features = ["serde"] }
+clap = { version = "4.5", features = ["derive"] }
+fs2 = "0.4"
 git2 = { version = "0.21", features = ["https", "vendored-libgit2", "vendored-openssl"] }
 globset = "0.4"
 hex = "0.4"
@@ -29,24 +39,26 @@ reqwest = { version = "0.12", default-features = false, features = ["json", "rus
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 sha2 = "0.10"
-tauri = { version = "2.11.5", features = [] }
+tauri = { version = "2.11.5", features = ["protocol-asset"] }
 tauri-plugin-dialog = "2.4"
 tauri-plugin-os = "2.3"
 tauri-plugin-opener = "2.5"
 thiserror = "2"
 url = "2.5"
 walkdir = "2.5"
+zip = { version = "8.3", default-features = false, features = ["deflate"] }
 
 [target.'cfg(target_os = "windows")'.dependencies]
 trash = "5.2"
 windows-native-keyring-store = { version = "1.1", default-features = false }
-windows-sys = { version = "0.61", features = ["Win32_Storage_FileSystem"] }
+windows-sys = { version = "0.61", features = ["Win32_Foundation", "Win32_Storage_FileSystem", "Win32_System_Threading"] }
 
 [target.'cfg(any(target_os = "macos", windows, target_os = "linux"))'.dependencies]
 tauri-plugin-single-instance = "2.4.3"
 
 [target.'cfg(target_os = "android")'.dependencies]
 android-native-keyring-store = "1.0"
+marktree-android-bridge = { path = "plugins/android-bridge" }
 
 [dev-dependencies]
 tempfile = "3.20"

@@ -16,8 +16,8 @@ use super::{
         stash_touched_paths_are_dirty,
     },
     sync_commit::{
-        align_index_paths_to_head, commit_only_paths, find_operation_commit,
-        tracked_workspace_paths,
+        align_index_paths_to_head, commit_prepared_workspace_changes, find_operation_commit,
+        prepare_workspace_changes, tracked_workspace_paths,
     },
 };
 use crate::{
@@ -26,7 +26,7 @@ use crate::{
     state::PersistentState,
     types::{
         ConflictRecord, CredentialRecord, GitOperationKind, GitOperationPhase, GitStatusSnapshot,
-        PendingGitOperation, SyncPlan, SyncResult, SyncStage,
+        OperationLogOutcome, PendingGitOperation, SyncPlan, SyncResult, SyncStage,
     },
 };
 
@@ -39,8 +39,8 @@ pub fn pull_rebase(
 }
 
 pub fn sync_plan(root: &str, app_state: &PersistentState) -> AppResult<SyncPlan> {
-    let repo = Repository::open(root)?;
-    let changed_paths = tracked_workspace_paths(&repo, &app_state.workspace_changes(root))?;
+    let repo = super::repository::open_exact_repository(root)?;
+    let changed_paths = tracked_workspace_paths(&repo, &app_state.try_workspace_changes(root)?)?;
     let remote_url = super::remote::remote_url(&repo);
     Ok(SyncPlan {
         root: workdir_string(&repo)?,
@@ -62,8 +62,8 @@ pub fn sync_workspace_changes(
 pub fn pending_git_operation(
     root: &str,
     app_state: &PersistentState,
-) -> Option<PendingGitOperation> {
-    app_state.pending_git_operation(root)
+) -> AppResult<Option<PendingGitOperation>> {
+    app_state.try_pending_git_operation(root)
 }
 
 pub fn resume_git_operation(
@@ -71,7 +71,7 @@ pub fn resume_git_operation(
     credential: Option<CredentialRecord>,
     app_state: &PersistentState,
 ) -> AppResult<SyncResult> {
-    let operation = app_state.pending_git_operation(root).ok_or_else(|| {
+    let operation = app_state.try_pending_git_operation(root)?.ok_or_else(|| {
         AppError::Message("There is no unfinished Git operation to resume.".to_owned())
     })?;
     if operation.aborting {
@@ -94,7 +94,7 @@ pub fn abort_git_operation(
     root: &str,
     app_state: &PersistentState,
 ) -> AppResult<GitStatusSnapshot> {
-    let mut operation = app_state.pending_git_operation(root).ok_or_else(|| {
+    let mut operation = app_state.try_pending_git_operation(root)?.ok_or_else(|| {
         AppError::Message("There is no unfinished Git operation to abort.".to_owned())
     })?;
     if !operation.aborting {
@@ -113,7 +113,7 @@ pub fn abort_git_operation(
         operation.aborting = true;
         app_state.update_git_operation(operation.clone())?;
     }
-    let mut repo = Repository::open(root)?;
+    let mut repo = super::repository::open_exact_repository(root)?;
 
     if operation.stash_oid.is_some() && !operation.stash_applied {
         if operation.stash_apply_started {
@@ -173,7 +173,7 @@ pub fn abort_git_operation(
     operation.pulled = false;
     app_state.update_git_operation(operation.clone())?;
     archive_operation_recoveries(&operation, app_state)?;
-    app_state.finish_git_operation(root, &operation.id)?;
+    app_state.finish_git_operation(root, &operation.id, OperationLogOutcome::Cancelled, None)?;
     status_snapshot(&repo)
 }
 
@@ -206,7 +206,7 @@ fn start_or_resume_git_operation(
     credential: Option<CredentialRecord>,
     app_state: &PersistentState,
 ) -> AppResult<SyncResult> {
-    if let Some(operation) = app_state.pending_git_operation(root) {
+    if let Some(operation) = app_state.try_pending_git_operation(root)? {
         if operation.kind != kind {
             return Err(AppError::GitOperationPending {
                 root: operation.root,
@@ -215,7 +215,7 @@ fn start_or_resume_git_operation(
         return drive_git_operation(operation, credential, app_state);
     }
     let workspace_changes = if kind == GitOperationKind::Sync {
-        app_state.workspace_changes(root)
+        app_state.try_workspace_changes(root)?
     } else {
         Vec::new()
     };
@@ -246,14 +246,40 @@ fn start_or_resume_git_operation(
 }
 
 fn drive_git_operation(
+    operation: PendingGitOperation,
+    credential: Option<CredentialRecord>,
+    app_state: &PersistentState,
+) -> AppResult<SyncResult> {
+    let root = operation.root.clone();
+    let id = operation.id.clone();
+    let result = drive_git_operation_inner(operation, credential, app_state);
+    if let Err(error) = &result {
+        if let Some(operation) = app_state
+            .try_pending_git_operation(&root)?
+            .filter(|operation| operation.id == id)
+        {
+            app_state.record_git_operation_failure(&operation, error);
+        }
+    }
+    result
+}
+
+fn drive_git_operation_inner(
     mut operation: PendingGitOperation,
     credential: Option<CredentialRecord>,
     app_state: &PersistentState,
 ) -> AppResult<SyncResult> {
     loop {
-        let mut repo = match Repository::open(&operation.root) {
+        let mut repo = match super::repository::open_exact_repository(&operation.root) {
             Ok(repo) => repo,
-            Err(error) => return Ok(operation_failure(&operation, SyncStage::Prepare, error)),
+            Err(error) => {
+                return Ok(operation_failure(
+                    &operation,
+                    SyncStage::Prepare,
+                    error,
+                    app_state,
+                ))
+            }
         };
         match operation.phase {
             GitOperationPhase::Prepare => {
@@ -261,9 +287,13 @@ fn drive_git_operation(
                     let paths = match tracked_workspace_paths(&repo, &operation.workspace_changes) {
                         Ok(paths) => paths,
                         Err(error) => {
-                            let result = operation_failure(&operation, SyncStage::Prepare, error);
-                            app_state.finish_git_operation(&operation.root, &operation.id)?;
-                            return Ok(result);
+                            let error: AppError = error;
+                            return finish_operation_failure(
+                                &operation,
+                                SyncStage::Prepare,
+                                &error,
+                                app_state,
+                            );
                         }
                     };
                     operation.changed_paths = paths.clone();
@@ -285,6 +315,7 @@ fn drive_git_operation(
                         AppError::Message(
                             "Only a Marktree sync can resume from the commit phase.".to_owned(),
                         ),
+                        app_state,
                     ));
                 }
                 if !operation.committed {
@@ -296,6 +327,7 @@ fn drive_git_operation(
                             AppError::Message(
                                 "The pending sync commit has no recorded paths.".to_owned(),
                             ),
+                            app_state,
                         ));
                     }
                     let oid = match find_operation_commit(&repo, &operation.id) {
@@ -305,26 +337,73 @@ fn drive_git_operation(
                                     &operation,
                                     SyncStage::Finalize,
                                     error,
+                                    app_state,
                                 ));
                             }
                             oid
                         }
-                        Ok(None) => match commit_only_paths(
-                            &repo,
-                            &paths,
-                            &format!(
-                                "Marktree sync {} [marktree-operation:{}]",
-                                Utc::now().format("%Y-%m-%d %H:%M UTC"),
-                                operation.id
-                            ),
-                        ) {
-                            Ok(oid) => oid,
-                            Err(error) => {
-                                return Ok(operation_failure(&operation, error.stage, error.error))
+                        Ok(None) => {
+                            let prepared = match prepare_workspace_changes(
+                                &repo,
+                                &operation.workspace_changes,
+                            ) {
+                                Ok(prepared) if prepared.paths() == paths => prepared,
+                                Ok(prepared) => {
+                                    let path = paths
+                                        .iter()
+                                        .find(|path| !prepared.paths().contains(path))
+                                        .or_else(|| {
+                                            prepared
+                                                .paths()
+                                                .iter()
+                                                .find(|path| !paths.contains(path))
+                                        })
+                                        .cloned()
+                                        .unwrap_or_else(|| "workspace".to_owned());
+                                    let error = AppError::ManagedContentChanged { path };
+                                    return finish_operation_failure(
+                                        &operation,
+                                        SyncStage::Commit,
+                                        &error,
+                                        app_state,
+                                    );
+                                }
+                                Err(error) => {
+                                    return finish_operation_failure(
+                                        &operation,
+                                        SyncStage::Commit,
+                                        &error,
+                                        app_state,
+                                    );
+                                }
+                            };
+                            match commit_prepared_workspace_changes(
+                                &repo,
+                                &prepared,
+                                &format!(
+                                    "Marktree sync {} [marktree-operation:{}]",
+                                    Utc::now().format("%Y-%m-%d %H:%M UTC"),
+                                    operation.id
+                                ),
+                            ) {
+                                Ok(oid) => oid,
+                                Err(error) => {
+                                    return Ok(operation_failure(
+                                        &operation,
+                                        error.stage,
+                                        error.error,
+                                        app_state,
+                                    ))
+                                }
                             }
-                        },
+                        }
                         Err(error) => {
-                            return Ok(operation_failure(&operation, SyncStage::Commit, error))
+                            return Ok(operation_failure(
+                                &operation,
+                                SyncStage::Commit,
+                                error,
+                                app_state,
+                            ))
                         }
                     };
                     operation.committed = true;
@@ -335,7 +414,12 @@ fn drive_git_operation(
             }
             GitOperationPhase::Fetch => {
                 if let Err(error) = fetch_remote(&repo, credential.clone()) {
-                    return Ok(operation_failure(&operation, SyncStage::Fetch, error));
+                    return Ok(operation_failure(
+                        &operation,
+                        SyncStage::Fetch,
+                        error,
+                        app_state,
+                    ));
                 }
                 match ensure_current_branch_upstream(&repo)? {
                     UpstreamDisposition::Configured => {
@@ -410,6 +494,7 @@ fn drive_git_operation(
                                          those files or safeguard the newer copies before retrying."
                                             .to_owned(),
                                     ),
+                                    app_state,
                                 ));
                             }
                         } else {
@@ -438,6 +523,7 @@ fn drive_git_operation(
                                         &operation,
                                         SyncStage::RestoreWorkingTree,
                                         error,
+                                        app_state,
                                     ))
                                 }
                             }
@@ -458,7 +544,12 @@ fn drive_git_operation(
             }
             GitOperationPhase::Push => {
                 if let Err(error) = push_current_branch(&repo, credential.clone()) {
-                    return Ok(operation_failure(&operation, SyncStage::Push, error));
+                    return Ok(operation_failure(
+                        &operation,
+                        SyncStage::Push,
+                        error,
+                        app_state,
+                    ));
                 }
                 operation.pushed = true;
                 operation.phase = GitOperationPhase::Finalize;
@@ -476,6 +567,7 @@ fn drive_git_operation(
                                 "The exact working-tree snapshot for this Git operation is missing."
                                     .to_owned(),
                             ),
+                            app_state,
                         ));
                     }
                     operation.stash_oid = None;
@@ -487,13 +579,28 @@ fn drive_git_operation(
                     if let Err(error) = app_state
                         .clear_workspace_changes(&operation.root, &operation.workspace_changes)
                     {
-                        return Ok(operation_failure(&operation, SyncStage::Finalize, error));
+                        return Ok(operation_failure(
+                            &operation,
+                            SyncStage::Finalize,
+                            error,
+                            app_state,
+                        ));
                     }
                 }
                 if let Err(error) = archive_operation_recoveries(&operation, app_state) {
-                    return Ok(operation_failure(&operation, SyncStage::Finalize, error));
+                    return Ok(operation_failure(
+                        &operation,
+                        SyncStage::Finalize,
+                        error,
+                        app_state,
+                    ));
                 }
-                app_state.finish_git_operation(&operation.root, &operation.id)?;
+                app_state.finish_git_operation(
+                    &operation.root,
+                    &operation.id,
+                    OperationLogOutcome::Succeeded,
+                    None,
+                )?;
                 return Ok(SyncResult {
                     committed: operation.committed,
                     commit_id: operation.commit_id,
@@ -513,8 +620,18 @@ fn operation_failure(
     operation: &PendingGitOperation,
     stage: SyncStage,
     error: impl Into<AppError>,
+    app_state: &PersistentState,
 ) -> SyncResult {
     let error = error.into();
+    app_state.record_git_operation_failure(operation, &error);
+    operation_failure_result(operation, stage, &error)
+}
+
+fn operation_failure_result(
+    operation: &PendingGitOperation,
+    stage: SyncStage,
+    error: &AppError,
+) -> SyncResult {
     SyncResult {
         committed: operation.committed,
         commit_id: operation.commit_id.clone(),
@@ -525,6 +642,22 @@ fn operation_failure(
         failure_stage: Some(stage),
         error: Some(error.payload()),
     }
+}
+
+fn finish_operation_failure(
+    operation: &PendingGitOperation,
+    stage: SyncStage,
+    error: &AppError,
+    app_state: &PersistentState,
+) -> AppResult<SyncResult> {
+    let result = operation_failure_result(operation, stage, error);
+    app_state.finish_git_operation(
+        &operation.root,
+        &operation.id,
+        OperationLogOutcome::Failed,
+        Some(error),
+    )?;
+    Ok(result)
 }
 
 fn operation_conflicts(

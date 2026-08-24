@@ -1,23 +1,25 @@
 import { i18n } from '@/i18n'
 import { isTauri, nativeApi } from '@/lib/api'
-import { createTextDiffResult } from '@/lib/textDiff'
-import type { ConflictRecord, DiffMode } from '@/types'
+import { createTextDiffResultAsync } from '@/lib/textDiff'
+import type { ConflictRecord, DiffMode, WorkspaceViewSnapshot } from '@/types'
 
 import {
   activeRoot,
   activeStatus,
   activeTab,
   activeWorkspace,
+  clearNotice,
   diffOpen,
   diffResult,
   ensureSession,
-  message,
+  gitBusyAction,
   setError,
+  setNotice,
   syncing,
-  updateWorktreeStatus,
 } from './state'
 import { flushAll } from './persistence'
 import { refreshActive } from './workspaces'
+import { loadDocuments } from './documents'
 
 export async function showDiff(mode: DiffMode) {
   const root = activeRoot.value
@@ -40,7 +42,7 @@ export async function showWorktreeDiff(rightRoot: string) {
       rightRoot,
       path: tab.path,
     })
-    diffResult.value = createTextDiffResult({
+    diffResult.value = await createTextDiffResultAsync({
       mode: 'worktreeToWorktree',
       oldLabel: comparison.leftLabel,
       newLabel: comparison.rightLabel,
@@ -55,25 +57,41 @@ export async function showWorktreeDiff(rightRoot: string) {
   }
 }
 
-export function showUnsavedDiff() {
+export async function showUnsavedDiff() {
   const tab = activeTab.value
   if (!tab) return
-  diffResult.value = createTextDiffResult({
-    mode: 'unsavedToDisk',
-    oldLabel: i18n.global.t('app.disk'),
-    newLabel: i18n.global.t('app.editor'),
-    path: tab.path,
-    header: i18n.global.t('app.diffUnsavedDisk'),
-    oldText: tab.diskContent,
-    newText: tab.content,
-  })
-  diffOpen.value = true
+  try {
+    const diskContent = tab.diskContent ?? (
+      isTauri()
+        ? (await nativeApi.readDocument({ root: tab.root, path: tab.path })).content
+        : tab.content
+    )
+    diffResult.value = await createTextDiffResultAsync({
+      mode: 'unsavedToDisk',
+      oldLabel: i18n.global.t('app.disk'),
+      newLabel: i18n.global.t('app.editor'),
+      path: tab.path,
+      header: i18n.global.t('app.diffUnsavedDisk'),
+      oldText: diskContent,
+      newText: tab.content,
+    })
+    diffOpen.value = true
+  } catch (reason) {
+    setError(reason)
+  }
 }
 
-export async function sync() {
+export async function sync(): Promise<boolean> {
   const root = activeRoot.value
-  if (!root || !activeWorkspace.value?.git || !isTauri() || syncing.value) return
+  if (
+    !root ||
+    !activeWorkspace.value?.git ||
+    !isTauri() ||
+    syncing.value ||
+    gitBusyAction.value
+  ) return false
   syncing.value = true
+  clearNotice()
   try {
     await flushAll(root)
     const pending = await nativeApi.pendingGitOperation({ root })
@@ -82,9 +100,9 @@ export async function sync() {
       if (pending.aborting) {
         await nativeApi.abortGitOperation({ root })
         ensureSession(root).pendingOperation = undefined
-        message.value = i18n.global.t('app.gitOperationAborted')
+        setNotice(i18n.global.t('app.gitOperationAborted'))
         await refreshActive()
-        return
+        return true
       }
       result = await nativeApi.resumeGitOperation({ root })
     } else {
@@ -99,11 +117,13 @@ export async function sync() {
     session.conflicts = result.conflicts
     session.pendingOperation = (await nativeApi.pendingGitOperation({ root })) ?? undefined
     if (!result.conflicts.length) {
-      message.value = i18n.global.t('app.syncComplete')
+      setNotice(i18n.global.t('app.syncComplete'))
       await refreshActive()
     }
+    return true
   } catch (reason) {
     setError(reason)
+    return false
   } finally {
     try {
       ensureSession(root).pendingOperation =
@@ -158,24 +178,27 @@ export async function finishConflictResolution(recoveryId: string) {
   session.conflicts = result.conflicts
   session.pendingOperation = (await nativeApi.pendingGitOperation({ root })) ?? undefined
   if (!result.conflicts.length) {
-    message.value = i18n.global.t('app.syncComplete')
+    setNotice(i18n.global.t('app.syncComplete'))
     await refreshActive()
   }
 }
 
-export async function abortGitOperation() {
+export async function abortGitOperation(): Promise<boolean> {
   const root = activeRoot.value
-  if (!root || !isTauri() || syncing.value) return
+  if (!root || !isTauri() || syncing.value || gitBusyAction.value) return false
   syncing.value = true
+  clearNotice()
   try {
     await nativeApi.abortGitOperation({ root })
     const session = ensureSession(root)
     session.conflicts = []
     session.pendingOperation = undefined
-    message.value = i18n.global.t('app.gitOperationAborted')
+    setNotice(i18n.global.t('app.gitOperationAborted'))
     await refreshActive()
+    return true
   } catch (reason) {
     setError(reason)
+    return false
   } finally {
     syncing.value = false
   }
@@ -184,11 +207,10 @@ export async function abortGitOperation() {
 export async function gitAction(
   action: 'fetch' | 'pull' | 'push' | 'stageAll' | 'commit',
   payload?: string,
-) {
-  const root = activeRoot.value
-  if (!root) return
-  try {
+): Promise<boolean> {
+  return runGitOperation(action, async (root) => {
     if (action !== 'fetch' && action !== 'push') await flushAll(root)
+    let view: WorkspaceViewSnapshot | undefined
     if (action === 'fetch') await nativeApi.fetch({ root })
     if (action === 'pull') {
       const result = await nativeApi.pullRebase({ root })
@@ -198,76 +220,79 @@ export async function gitAction(
       session.pendingOperation = (await nativeApi.pendingGitOperation({ root })) ?? undefined
     }
     if (action === 'push') await nativeApi.push({ root })
-    if (action === 'stageAll') await nativeApi.stageAll({ root })
-    if (action === 'commit') await nativeApi.commit({ root, message: payload ?? '' })
-    await refreshActive()
-  } catch (reason) {
-    setError(reason)
-    if (action === 'pull') {
-      try {
-        ensureSession(root).pendingOperation =
-          (await nativeApi.pendingGitOperation({ root })) ?? undefined
-      } catch {
-        // Preserve the primary Git error.
-      }
+    if (action === 'stageAll') view = await nativeApi.stageAll({ root })
+    if (action === 'commit') view = await nativeApi.commit({ root, message: payload ?? '' })
+    if (view) await loadDocuments(root, view)
+    else await refreshActive()
+  }, async (root) => {
+    if (action !== 'pull') return
+    try {
+      ensureSession(root).pendingOperation =
+        (await nativeApi.pendingGitOperation({ root })) ?? undefined
+    } catch {
+      // Preserve the primary Git error.
     }
-  }
+  })
 }
 
-export async function setPathStaged(path: string, staged: boolean) {
-  const root = activeRoot.value
-  if (!root) return
-  try {
+export async function setPathStaged(path: string, staged: boolean): Promise<boolean> {
+  return runGitOperation(staged ? 'stagePath' : 'unstagePath', async (root) => {
     await flushAll(root)
-    const status = staged
+    const view = staged
       ? await nativeApi.stagePaths({ root, paths: [path] })
       : await nativeApi.unstagePaths({ root, paths: [path] })
-    updateWorktreeStatus(root, status)
-  } catch (reason) {
-    setError(reason)
-  }
+    await loadDocuments(root, view)
+  })
 }
 
-export async function createBranch(name: string, startPoint?: string) {
-  const root = activeRoot.value
-  if (!root || !name.trim()) return
-  try {
+export async function createBranch(name: string, startPoint?: string): Promise<boolean> {
+  if (!name.trim()) return false
+  return runGitOperation('createBranch', async (root) => {
     await flushAll(root)
-    const status = await nativeApi.createBranch({
+    const view = await nativeApi.createBranch({
       root,
       name: name.trim(),
       startPoint: startPoint?.trim() || null,
       checkout: true,
     })
-    updateWorktreeStatus(root, status)
-    await refreshActive()
-  } catch (reason) {
-    setError(reason)
-  }
+    await loadDocuments(root, view)
+  })
 }
 
-export async function checkoutBranch(name: string) {
-  const root = activeRoot.value
-  if (!root || activeStatus.value?.branch === name) return
-  try {
+export async function checkoutBranch(name: string): Promise<boolean> {
+  if (activeStatus.value?.branch === name) return true
+  return runGitOperation('checkoutBranch', async (root) => {
     await flushAll(root)
-    const status = await nativeApi.checkoutBranch({ root, name })
-    updateWorktreeStatus(root, status)
-    await refreshActive()
-  } catch (reason) {
-    setError(reason)
-  }
+    const view = await nativeApi.checkoutBranch({ root, name })
+    await loadDocuments(root, view)
+  })
 }
 
-export async function deleteBranch(name: string) {
-  const root = activeRoot.value
-  if (!root) return
-  try {
+export async function deleteBranch(name: string): Promise<boolean> {
+  return runGitOperation('deleteBranch', async (root) => {
     await flushAll(root)
     ensureSession(root).branches = await nativeApi.deleteBranch({ root, name })
-    await refreshActive()
+  })
+}
+
+async function runGitOperation(
+  action: string,
+  operation: (root: string) => Promise<void>,
+  afterFailure?: (root: string) => Promise<void>,
+): Promise<boolean> {
+  const root = activeRoot.value
+  if (!root || gitBusyAction.value || syncing.value) return false
+  gitBusyAction.value = action
+  clearNotice()
+  try {
+    await operation(root)
+    return true
   } catch (reason) {
     setError(reason)
+    await afterFailure?.(root)
+    return false
+  } finally {
+    gitBusyAction.value = undefined
   }
 }
 

@@ -1,25 +1,34 @@
-import { WebviewWindow } from '@tauri-apps/api/webviewWindow'
 import { open } from '@tauri-apps/plugin-dialog'
 import { watch, type Ref } from 'vue'
 
-import type { useWorkspace } from '@/composables/useWorkspace'
+import type { WorkspaceApi } from '@/composables/useWorkspace'
 import { i18n } from '@/i18n'
 import { isTauri, nativeApi } from '@/lib/api'
-import { readableError } from '@/lib/errors'
+import { windowService } from '@/lib/windowService'
 import type { WorktreeDescriptor } from '@/types'
 
 import type { AppModal, WorkspaceDialogForm } from './dialogState'
 
-type Workspace = ReturnType<typeof useWorkspace>
+type Workspace = Pick<
+  WorkspaceApi,
+  | 'activeWorkspace'
+  | 'activeWorktree'
+  | 'addWorkspace'
+  | 'createDocument'
+  | 'error'
+  | 'refreshActive'
+  | 'reportError'
+>
 
 export function useWorkspaceProvisioning(
   workspace: Workspace,
-  modal: Ref<AppModal | undefined>,
   form: WorkspaceDialogForm,
   nativeAndroid: Ref<boolean>,
   addMenuOpen: Ref<boolean>,
   cloneCredentialId: Ref<string | undefined>,
   prepareCloneCredentials: () => Promise<void>,
+  openDialog: (value: AppModal) => void,
+  runDialogAction: <T>(action: () => Promise<T>) => Promise<T | undefined>,
   closeModal: () => void,
 ) {
   async function chooseWorkspace(action: 'open' | 'create') {
@@ -27,41 +36,36 @@ export function useWorkspaceProvisioning(
     if (!isTauri()) return
     if (nativeAndroid.value && action === 'create') {
       form.workspaceName = ''
-      modal.value = 'mobileWorkspace'
+      openDialog('mobileWorkspace')
       return
     }
     try {
       const selected = await open({ directory: true, multiple: false })
       if (!selected) return
-      let path = selected
       if (action === 'create') {
-        const name = window.prompt(i18n.global.t('app.workspaceName'))
-        if (!name?.trim()) return
-        const separator = selected.includes('\\') ? '\\' : '/'
-        path = `${selected}${separator}${name.trim()}`
+        form.destination = selected
+        form.workspaceName = ''
+        openDialog('desktopWorkspace')
+        return
       }
-      const descriptor =
-        action === 'open'
-          ? await nativeApi.openWorkspace({ path })
-          : await nativeApi.createWorkspace({ path })
+      const descriptor = await nativeApi.openWorkspace({ path: selected })
       await workspace.addWorkspace(descriptor)
     } catch (reason) {
-      workspace.error.value = readableError(reason)
+      workspace.reportError(reason)
     }
   }
 
   async function chooseCloneDestination() {
-    try {
+    await runDialogAction(async () => {
       const selected = await open({ directory: true, multiple: false })
       if (selected) form.destination = selected
-    } catch (reason) {
-      workspace.error.value = readableError(reason)
-    }
+      return true
+    })
   }
 
   async function openCloneDialog() {
     addMenuOpen.value = false
-    modal.value = 'clone'
+    openDialog('clone')
     form.remoteUrl = ''
     form.workspaceName = ''
     await prepareCloneCredentials()
@@ -71,7 +75,7 @@ export function useWorkspaceProvisioning(
     if (!form.remoteUrl.trim() || (!nativeAndroid.value && !form.destination.trim())) {
       return
     }
-    try {
+    const created = await runDialogAction(async () => {
       if (form.credentialToken.trim()) {
         cloneCredentialId.value ??= `clone-${crypto.randomUUID()}`
         await nativeApi.saveCredential({
@@ -98,33 +102,49 @@ export function useWorkspaceProvisioning(
             credentialId: cloneCredentialId.value ?? null,
           })
       await workspace.addWorkspace(descriptor)
-      closeModal()
-    } catch (reason) {
-      workspace.error.value = readableError(reason)
-    }
+      return true
+    })
+    if (created) closeModal()
   }
 
   async function createMobileWorkspace() {
     if (!form.workspaceName.trim()) return
-    try {
+    const created = await runDialogAction(async () => {
       const descriptor = await nativeApi.createMobileWorkspace({
         workspaceName: form.workspaceName.trim(),
       })
       await workspace.addWorkspace(descriptor)
-      closeModal()
-    } catch (reason) {
-      workspace.error.value = readableError(reason)
-    }
+      return true
+    })
+    if (created) closeModal()
+  }
+
+  async function createDesktopWorkspace() {
+    if (!form.destination.trim() || !form.workspaceName.trim()) return
+    const created = await runDialogAction(async () => {
+      const separator = form.destination.includes('\\') ? '\\' : '/'
+      const path = `${form.destination.replace(/[\\/]$/, '')}${separator}${form.workspaceName.trim()}`
+      const descriptor = await nativeApi.createWorkspace({ path })
+      await workspace.addWorkspace(descriptor)
+      return true
+    })
+    if (created) closeModal()
   }
 
   function openNewDocument(directory = '') {
     form.documentPath = directory ? `${directory}/` : ''
-    modal.value = 'document'
+    openDialog('document')
   }
 
   async function createDocument() {
     if (!form.documentPath.trim()) return
-    if (await workspace.createDocument(form.documentPath.trim())) closeModal()
+    const created = await runDialogAction(async () => {
+      if (!await workspace.createDocument(form.documentPath.trim())) {
+        throw new Error(workspace.error.value || i18n.global.t('app.newDocument'))
+      }
+      return true
+    })
+    if (created) closeModal()
   }
 
   function openWorktreeDialog() {
@@ -134,7 +154,7 @@ export function useWorkspaceProvisioning(
     form.worktreeBranch = ''
     form.worktreeStart = workspace.activeWorktree.value?.branch ?? 'HEAD'
     form.worktreePath = ''
-    modal.value = 'worktree'
+    openDialog('worktree')
   }
 
   watch(
@@ -152,7 +172,7 @@ export function useWorkspaceProvisioning(
   async function createWorktree() {
     const activeWorkspace = workspace.activeWorkspace.value
     if (!activeWorkspace?.git) return
-    try {
+    const created = await runDialogAction(async () => {
       await nativeApi.createWorktree({
         request: {
           root: activeWorkspace.root,
@@ -163,27 +183,21 @@ export function useWorkspaceProvisioning(
         },
       })
       await workspace.refreshActive()
-      closeModal()
-    } catch (reason) {
-      workspace.error.value = readableError(reason)
-    }
+      return true
+    })
+    if (created) closeModal()
   }
 
-  function openWorktreeWindow(worktree: WorktreeDescriptor) {
+  async function openWorktreeWindow(worktree: WorktreeDescriptor) {
     if (!isTauri()) return
     try {
-      const label = `workspace-${crypto.randomUUID()}`
-      new WebviewWindow(label, {
-        url: `/?root=${encodeURIComponent(workspace.activeWorkspace.value?.root ?? worktree.path)}&worktree=${encodeURIComponent(worktree.path)}`,
+      await windowService.openWorkspaceWindow({
+        root: workspace.activeWorkspace.value?.root ?? worktree.path,
+        worktree: worktree.path,
         title: `${workspace.activeWorkspace.value?.name ?? 'Marktree'} · ${worktree.name}`,
-        width: 1280,
-        height: 820,
-        minWidth: 900,
-        minHeight: 600,
-        decorations: false,
       })
     } catch (reason) {
-      workspace.error.value = readableError(reason)
+      workspace.reportError(reason)
     }
   }
 
@@ -193,6 +207,7 @@ export function useWorkspaceProvisioning(
     openCloneDialog,
     cloneGitWorkspace,
     createMobileWorkspace,
+    createDesktopWorkspace,
     openNewDocument,
     createDocument,
     openWorktreeDialog,

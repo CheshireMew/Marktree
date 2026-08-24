@@ -5,15 +5,22 @@
   flex-direction: column;
   border-left: 1px solid var(--border);
   background: var(--panel);
+  overflow-x: hidden;
+  overflow-y: auto;
+  overscroll-behavior: contain;
 }
 
 .panel-header {
+  position: sticky;
+  z-index: 2;
+  top: 0;
   display: flex;
   min-height: 54px;
   align-items: center;
   justify-content: space-between;
   padding: 9px 13px 9px 16px;
   border-bottom: 1px solid var(--border);
+  background: var(--panel);
 }
 
 .panel-header h3 {
@@ -23,7 +30,7 @@
 
 .panel-header span {
   color: var(--text-soft);
-  font-size: 10px;
+  font-size: 11px;
 }
 
 .panel-header > button,
@@ -50,7 +57,30 @@
   gap: 12px;
   padding: 9px 15px 2px;
   color: var(--text-soft);
-  font-size: 10px;
+  font-size: 11px;
+}
+
+.git-operation-state {
+  display: flex;
+  min-height: 32px;
+  align-items: center;
+  gap: 7px;
+  padding: 0 14px;
+  color: var(--text-soft);
+  background: var(--selection);
+  font-size: 11px;
+}
+
+.git-operation-state svg {
+  animation: git-operation-spin 900ms linear infinite;
+}
+
+@keyframes git-operation-spin {
+  to { transform: rotate(360deg); }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .git-operation-state svg { animation: none; }
 }
 
 .git-summary span {
@@ -73,12 +103,17 @@
   gap: 6px;
 }
 
+.branch-manager > form {
+  display: grid;
+  grid-template-columns: minmax(0, 1.2fr) minmax(0, 1fr) 29px;
+}
+
 .branch-manager > label span {
   display: flex;
   align-items: center;
   gap: 5px;
   color: var(--text-soft);
-  font-size: 10px;
+  font-size: 11px;
 }
 
 .branch-manager select,
@@ -91,7 +126,7 @@
   padding: 0 7px;
   color: var(--text);
   background: var(--surface);
-  font-size: 10px;
+  font-size: 11px;
 }
 
 .branch-manager select {
@@ -145,12 +180,12 @@
 }
 
 .branch-row strong {
-  font-size: 10px;
+  font-size: 11px;
 }
 
 .branch-row small {
   color: var(--text-soft);
-  font-size: 9px;
+  font-size: 11px;
 }
 
 .branch-row > button:disabled,
@@ -167,7 +202,7 @@
   min-height: 29px;
   flex: 1;
   padding: 0 5px;
-  font-size: 10px;
+  font-size: 11px;
 }
 
 .change-group {
@@ -182,7 +217,7 @@
   justify-content: space-between;
   padding: 0 13px;
   color: var(--text-soft);
-  font-size: 10px;
+  font-size: 11px;
   font-weight: 700;
   letter-spacing: 0.04em;
   text-transform: uppercase;
@@ -218,19 +253,22 @@
 .change-row span {
   flex: 1;
   overflow: hidden;
-  font-size: 10px;
+  font-size: 11px;
   text-overflow: ellipsis;
   white-space: nowrap;
 }
 
 .change-row i {
   color: #c48030;
-  font-size: 10px;
+  font-size: 11px;
   font-style: normal;
   font-weight: 700;
 }
 
 .commit-box {
+  position: sticky;
+  z-index: 1;
+  bottom: 0;
   display: flex;
   min-height: 124px;
   flex-direction: column;
@@ -238,6 +276,7 @@
   margin-top: auto;
   padding: 11px;
   border-top: 1px solid var(--border);
+  background: var(--panel);
 }
 
 .commit-box textarea {

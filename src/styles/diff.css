@@ -34,7 +34,7 @@
   border-radius: 6px;
   outline: 0;
   background: var(--panel);
-  font-size: 10px;
+  font-size: 11px;
 }
 
 .diff-content {
@@ -60,9 +60,25 @@
   font-family: var(--ui-font);
 }
 
+.diff-hunk {
+  content-visibility: auto;
+  contain-intrinsic-size: auto 420px;
+}
+
+.diff-truncated {
+  position: sticky;
+  z-index: 2;
+  top: 0;
+  padding: 8px 13px;
+  color: var(--text-soft);
+  border-bottom: 1px solid var(--border);
+  background: var(--panel);
+  font-family: var(--ui-font);
+}
+
 .diff-file > header i {
   color: var(--text-soft);
-  font-size: 9px;
+  font-size: 11px;
   font-style: normal;
   text-transform: uppercase;
 }

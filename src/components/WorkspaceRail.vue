@@ -31,11 +31,11 @@ defineEmits<{
         <Folder :size="20" />
         <span>{{ workspace.name.slice(0, 1).toUpperCase() }}</span>
         <i
-          v-if="workspace.git && (workspace.git.status.changedCount || workspace.git.status.stagedCount)"
+          v-if="workspace.git?.status && (workspace.git.status.changedCount || workspace.git.status.stagedCount)"
           class="change-dot"
         />
       </button>
-      <button class="workspace-button subtle" :title="$t('app.addWorkspace')" @click="$emit('add')">
+      <button class="workspace-button subtle" :title="$t('app.addWorkspace')" :aria-label="$t('app.addWorkspace')" @click="$emit('add')">
         <Plus :size="21" />
       </button>
     </nav>

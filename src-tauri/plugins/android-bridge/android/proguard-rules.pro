@@ -1,0 +1,1 @@
+-keep class io.github.cheshiremew.marktree.bridge.SharePlugin { *; }

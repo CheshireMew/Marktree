@@ -3,32 +3,30 @@ use std::{
     path::{Path, PathBuf},
 };
 
-use base64::{engine::general_purpose::STANDARD, Engine};
-
 use super::config::read_workspace_config;
 use crate::{
     content_policy::{document_kind, supported_image_extension},
     error::{AppError, AppResult},
-    file_version::hash_bytes,
-    git,
+    file_version::hash_file,
     paths::{
-        atomic_write, canonical_root, normalize_relative, path_to_slashes, resolve_existing_file,
-        resolve_for_write,
+        atomic_copy_if_version, canonical_root, normalize_content_relative, path_to_slashes,
+        resolve_existing_file, resolve_for_write,
     },
     state::PersistentState,
-    types::{AssetPreview, AssetWriteResult, DocumentKind, WorkspaceChangeOperation},
+    types::{AssetWriteResult, DocumentKind, WorkspaceFilePreview},
+    workspace_operation::{execute_mutation, WorkspaceChangeIntent, WorkspaceOperationKind},
 };
 
-const MAX_ASSET_BYTES: u64 = 64 * 1024 * 1024;
+pub(crate) const MAX_ASSET_BYTES: u64 = 64 * 1024 * 1024;
+const MAX_IMAGE_PREVIEW_BYTES: u64 = 64 * 1024 * 1024;
+const MAX_PDF_PREVIEW_BYTES: u64 = 512 * 1024 * 1024;
+const MAX_STREAM_PREVIEW_BYTES: u64 = 8 * 1024 * 1024 * 1024;
 
-pub fn read_asset(root: &str, path: &str) -> AppResult<AssetPreview> {
+pub fn read_workspace_preview(root: &str, path: &str) -> AppResult<WorkspaceFilePreview> {
     let root_path = canonical_root(root)?;
-    let file_path = resolve_existing_file(&root_path, path)?;
-    if document_kind(&file_path) != DocumentKind::Image {
-        return Err(AppError::Message(
-            "Only supported image assets can be previewed.".to_owned(),
-        ));
-    }
+    let relative = normalize_content_relative(path)?;
+    let file_path = resolve_existing_file(&root_path, &relative)?;
+    let kind = document_kind(&file_path);
     let extension = file_path
         .extension()
         .and_then(|value| value.to_str())
@@ -37,6 +35,17 @@ pub fn read_asset(root: &str, path: &str) -> AppResult<AssetPreview> {
     let media_type = match extension.as_str() {
         "jpg" | "jpeg" => "image/jpeg",
         "svg" => "image/svg+xml",
+        "pdf" => "application/pdf",
+        "mp3" => "audio/mpeg",
+        "m4a" => "audio/mp4",
+        "aac" => "audio/aac",
+        "wav" => "audio/wav",
+        "ogg" | "opus" => "audio/ogg",
+        "flac" => "audio/flac",
+        "mp4" | "m4v" => "video/mp4",
+        "webm" => "video/webm",
+        "mov" => "video/quicktime",
+        "ogv" => "video/ogg",
         value => match value {
             "png" => "image/png",
             "gif" => "image/gif",
@@ -44,20 +53,37 @@ pub fn read_asset(root: &str, path: &str) -> AppResult<AssetPreview> {
             "avif" => "image/avif",
             _ => {
                 return Err(AppError::Message(
-                    "Only supported image assets can be previewed.".to_owned(),
+                    "This file type cannot be previewed in Marktree.".to_owned(),
                 ))
             }
         },
     };
-    if fs::metadata(&file_path)?.len() > MAX_ASSET_BYTES {
+    if !matches!(
+        kind,
+        DocumentKind::Image | DocumentKind::Pdf | DocumentKind::Audio | DocumentKind::Video
+    ) {
         return Err(AppError::Message(
-            "The image is too large to preview in Marktree.".to_owned(),
+            "This file type cannot be previewed in Marktree.".to_owned(),
         ));
     }
-    Ok(AssetPreview {
-        path: normalize_relative(path)?,
+    let size = fs::metadata(&file_path)?.len();
+    let max_bytes = match kind {
+        DocumentKind::Image => MAX_IMAGE_PREVIEW_BYTES,
+        DocumentKind::Pdf => MAX_PDF_PREVIEW_BYTES,
+        DocumentKind::Audio | DocumentKind::Video => MAX_STREAM_PREVIEW_BYTES,
+        _ => unreachable!("preview kind was validated above"),
+    };
+    if size > max_bytes {
+        return Err(AppError::Message(
+            "The file is too large to preview in Marktree; open it with the system instead."
+                .to_owned(),
+        ));
+    }
+    Ok(WorkspaceFilePreview {
+        path: relative,
+        kind,
         media_type: media_type.to_owned(),
-        base64_data: STANDARD.encode(fs::read(file_path)?),
+        resource_path: file_path.to_string_lossy().into_owned(),
     })
 }
 
@@ -65,12 +91,12 @@ pub fn write_asset(
     root: &str,
     document_path: &str,
     file_name: &str,
-    base64_data: &str,
+    source_path: &Path,
     assets_dir: Option<&str>,
     app_state: &PersistentState,
 ) -> AppResult<AssetWriteResult> {
     let root_path = canonical_root(root)?;
-    let document_relative = normalize_relative(document_path)?;
+    let document_relative = normalize_content_relative(document_path)?;
     let configured_assets_dir;
     let selected_assets_dir = if let Some(assets_dir) = assets_dir {
         assets_dir
@@ -78,21 +104,13 @@ pub fn write_asset(
         configured_assets_dir = read_workspace_config(root)?.config.assets_dir;
         configured_assets_dir.as_str()
     };
-    let asset_root_relative = normalize_relative(selected_assets_dir)?;
-    if base64_data.len() as u64 > (MAX_ASSET_BYTES * 4 / 3) + 8 {
+    let asset_root_relative = normalize_content_relative(selected_assets_dir)?;
+    if !source_path.is_file() || fs::metadata(source_path)?.len() > MAX_ASSET_BYTES {
         return Err(AppError::Message(
             "The image is too large to store in Marktree.".to_owned(),
         ));
     }
-    let bytes = STANDARD
-        .decode(base64_data)
-        .map_err(|error| AppError::Message(format!("Invalid asset data: {error}")))?;
-    if bytes.len() as u64 > MAX_ASSET_BYTES {
-        return Err(AppError::Message(
-            "The image is too large to store in Marktree.".to_owned(),
-        ));
-    }
-    let sha256 = hash_bytes(&bytes);
+    let sha256 = hash_file(source_path)?;
     let extension = supported_image_extension(Path::new(file_name))
         .ok_or_else(|| AppError::Message("Unsupported image type.".to_owned()))?;
     let stored_name = format!("{}.{}", &sha256[..24], extension);
@@ -102,20 +120,31 @@ pub fn write_asset(
         stored_name
     );
     let asset_path = resolve_for_write(&root_path, &relative_asset)?;
-    if let Some(parent) = asset_path.parent() {
-        fs::create_dir_all(parent)?;
-    }
-    if git::has_git_capability(root) {
-        app_state.record_workspace_change(
-            root,
-            &relative_asset,
-            WorkspaceChangeOperation::Upsert,
-            Some(&sha256),
-        )?;
-    }
-    if !asset_path.exists() || fs::read(&asset_path)? != bytes {
-        atomic_write(&asset_path, &bytes)?;
-    }
+    execute_mutation(
+        root,
+        WorkspaceOperationKind::WriteFile {
+            path: relative_asset.clone(),
+            version: sha256.clone(),
+            previous_version: None,
+            replace_existing: true,
+        },
+        vec![WorkspaceChangeIntent::upsert(&relative_asset, &sha256)],
+        app_state,
+        (),
+        |operation| {
+            if !asset_path.exists() || hash_file(&asset_path)? != sha256 {
+                atomic_copy_if_version(
+                    source_path,
+                    &asset_path,
+                    None,
+                    !asset_path.exists(),
+                    true,
+                    &operation.id,
+                )?;
+            }
+            Ok(())
+        },
+    )?;
 
     let document_directory = Path::new(&document_relative)
         .parent()

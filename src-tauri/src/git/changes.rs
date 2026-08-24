@@ -17,11 +17,13 @@ use crate::{
 
 use super::{
     remote::{fetch_remote, push_current_branch},
-    repository::{is_staged, signature, status_snapshot, upstream_commit, workdir},
+    repository::{
+        is_staged, open_exact_repository, signature, status_snapshot, upstream_commit, workdir,
+    },
 };
 
 pub fn stage_paths(root: &str, paths: &[String]) -> AppResult<GitStatusSnapshot> {
-    let repo = Repository::open(root)?;
+    let repo = open_exact_repository(root)?;
     let root_path = canonical_root(workdir(&repo)?.to_string_lossy().as_ref())?;
     let mut index = repo.index()?;
     for path in normalize_relative_paths(paths)? {
@@ -37,7 +39,7 @@ pub fn stage_paths(root: &str, paths: &[String]) -> AppResult<GitStatusSnapshot>
 }
 
 pub fn stage_all(root: &str) -> AppResult<GitStatusSnapshot> {
-    let repo = Repository::open(root)?;
+    let repo = open_exact_repository(root)?;
     let mut index = repo.index()?;
     index.add_all(["*"].iter(), IndexAddOption::DEFAULT, None)?;
     index.update_all(["*"].iter(), None)?;
@@ -46,7 +48,7 @@ pub fn stage_all(root: &str) -> AppResult<GitStatusSnapshot> {
 }
 
 pub fn unstage_paths(root: &str, paths: &[String]) -> AppResult<GitStatusSnapshot> {
-    let repo = Repository::open(root)?;
+    let repo = open_exact_repository(root)?;
     let paths = normalize_relative_paths(paths)?;
     let path_refs: Vec<&Path> = paths.iter().map(Path::new).collect();
     match repo.head() {
@@ -76,24 +78,22 @@ pub fn commit(root: &str, message: &str) -> AppResult<String> {
             "A commit message is required.".to_owned(),
         ));
     }
-    let repo = Repository::open(root)?;
+    let repo = open_exact_repository(root)?;
     Ok(create_commit(&repo, message.trim())?.to_string())
 }
 
-pub fn fetch(root: &str, credential: Option<CredentialRecord>) -> AppResult<GitStatusSnapshot> {
-    let repo = Repository::open(root)?;
-    fetch_remote(&repo, credential)?;
-    status_snapshot(&repo)
+pub fn fetch(root: &str, credential: Option<CredentialRecord>) -> AppResult<()> {
+    let repo = open_exact_repository(root)?;
+    fetch_remote(&repo, credential)
 }
 
-pub fn push(root: &str, credential: Option<CredentialRecord>) -> AppResult<GitStatusSnapshot> {
-    let repo = Repository::open(root)?;
-    push_current_branch(&repo, credential)?;
-    status_snapshot(&repo)
+pub fn push(root: &str, credential: Option<CredentialRecord>) -> AppResult<()> {
+    let repo = open_exact_repository(root)?;
+    push_current_branch(&repo, credential)
 }
 
 pub fn diff(root: &str, mode: DiffMode) -> AppResult<DiffResult> {
-    let repo = Repository::open(root)?;
+    let repo = open_exact_repository(root)?;
     let mut options = DiffOptions::new();
     options
         .include_untracked(true)
@@ -157,8 +157,11 @@ fn structured_diff(
     old_label: String,
     new_label: String,
 ) -> AppResult<DiffResult> {
+    const MAX_RENDERED_DIFF_LINES: usize = 20_000;
     let stats = diff.stats()?;
     let mut files = Vec::new();
+    let mut rendered_lines = 0usize;
+    let mut omitted_lines = 0usize;
     for index in 0..diff.deltas().len() {
         let delta = diff
             .get_delta(index)
@@ -178,6 +181,10 @@ fn structured_diff(
                 let (hunk, line_count) = patch.hunk(hunk_index)?;
                 let mut lines = Vec::new();
                 for line_index in 0..line_count {
+                    if rendered_lines >= MAX_RENDERED_DIFF_LINES {
+                        omitted_lines += 1;
+                        continue;
+                    }
                     let line = patch.line_in_hunk(hunk_index, line_index)?;
                     lines.push(DiffLine {
                         kind: match line.origin() {
@@ -190,15 +197,18 @@ fn structured_diff(
                         new_line: line.new_lineno(),
                         content: String::from_utf8_lossy(line.content()).into_owned(),
                     });
+                    rendered_lines += 1;
                 }
-                hunks.push(DiffHunk {
-                    header: String::from_utf8_lossy(hunk.header()).trim_end().to_owned(),
-                    old_start: hunk.old_start(),
-                    old_lines: hunk.old_lines(),
-                    new_start: hunk.new_start(),
-                    new_lines: hunk.new_lines(),
-                    lines,
-                });
+                if !lines.is_empty() {
+                    hunks.push(DiffHunk {
+                        header: String::from_utf8_lossy(hunk.header()).trim_end().to_owned(),
+                        old_start: hunk.old_start(),
+                        old_lines: hunk.old_lines(),
+                        new_start: hunk.new_start(),
+                        new_lines: hunk.new_lines(),
+                        lines,
+                    });
+                }
             }
         }
         files.push(DiffFile {
@@ -215,6 +225,8 @@ fn structured_diff(
         new_label,
         insertions: stats.insertions(),
         deletions: stats.deletions(),
+        truncated: omitted_lines > 0,
+        omitted_lines,
         files,
     })
 }

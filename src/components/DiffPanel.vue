@@ -1,7 +1,7 @@
 <script setup lang="ts">
 import { ChevronDown, Columns2, Rows3, X } from 'lucide-vue-next'
 import { diffWords } from 'diff'
-import { computed, ref } from 'vue'
+import { computed, ref, watch } from 'vue'
 import { useI18n } from 'vue-i18n'
 
 import type { DiffLine, DiffMode, WorkspaceDiffResult } from '@/types'
@@ -24,6 +24,11 @@ const modes = computed<Array<{ value: DiffMode; label: string }>>(() => [
   { value: 'worktreeToHead', label: t('app.diffWorktreeHead') },
   { value: 'localToUpstream', label: t('app.diffLocalRemote') },
 ])
+let segmentCache = new WeakMap<DiffLine, Array<{ value: string; changed: boolean }>>()
+
+watch(() => props.result, () => {
+  segmentCache = new WeakMap()
+})
 
 const hunkCount = computed(() =>
   props.result.files.reduce((count, file) => count + file.hunks.length, 0),
@@ -40,17 +45,22 @@ function newText(line: DiffLine) {
 function wordSegments(lines: DiffLine[], index: number) {
   const line = lines[index]
   if (!line) return [{ value: '', changed: false }]
+  const cached = segmentCache.get(line)
+  if (cached) return cached
+  let result: Array<{ value: string; changed: boolean }>
   if (line.kind === 'deletion' && lines[index + 1]?.kind === 'addition') {
-    return diffWords(line.content, lines[index + 1]?.content ?? '')
+    result = diffWords(line.content, lines[index + 1]?.content ?? '')
       .filter((part) => !part.added)
       .map((part) => ({ value: part.value, changed: Boolean(part.removed) }))
-  }
-  if (line.kind === 'addition' && lines[index - 1]?.kind === 'deletion') {
-    return diffWords(lines[index - 1]?.content ?? '', line.content)
+  } else if (line.kind === 'addition' && lines[index - 1]?.kind === 'deletion') {
+    result = diffWords(lines[index - 1]?.content ?? '', line.content)
       .filter((part) => !part.removed)
       .map((part) => ({ value: part.value, changed: Boolean(part.added) }))
+  } else {
+    result = [{ value: line.content, changed: false }]
   }
-  return [{ value: line.content, changed: false }]
+  segmentCache.set(line, result)
+  return result
 }
 
 function hunkId(fileIndex: number, hunkIndex: number) {
@@ -104,18 +114,21 @@ function jumpNext() {
             {{ mode.label }}
           </option>
         </select>
-        <button :title="$t('app.nextChange')" @click="jumpNext"><ChevronDown :size="15" /></button>
-        <button :class="{ active: layout === 'inline' }" @click="layout = 'inline'">
+        <button :title="$t('app.nextChange')" :aria-label="$t('app.nextChange')" @click="jumpNext"><ChevronDown :size="15" /></button>
+        <button :class="{ active: layout === 'inline' }" :aria-label="$t('app.inlineDiff')" @click="layout = 'inline'">
           <Rows3 :size="15" />
         </button>
-        <button :class="{ active: layout === 'split' }" @click="layout = 'split'">
+        <button :class="{ active: layout === 'split' }" :aria-label="$t('app.splitDiff')" @click="layout = 'split'">
           <Columns2 :size="15" />
         </button>
-        <button @click="$emit('close')"><X :size="16" /></button>
+        <button :aria-label="$t('app.close')" @click="$emit('close')"><X :size="16" /></button>
       </div>
     </header>
 
     <div class="diff-content" :class="layout">
+      <div v-if="result.truncated" class="diff-truncated">
+        {{ $t('app.diffTruncated', { count: result.omittedLines }) }}
+      </div>
       <article v-for="(file, fileIndex) in result.files" :key="file.path" class="diff-file">
         <header>
           <span>{{ file.path }}</span>

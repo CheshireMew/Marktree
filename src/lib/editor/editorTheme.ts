@@ -8,11 +8,11 @@ export function editorTheme(dark: boolean): Extension {
         height: '100%',
         backgroundColor: 'transparent',
         color: 'var(--editor-text)',
-        fontSize: '17px',
+        fontSize: 'var(--editor-font-size, 17px)',
       },
       '.cm-scroller': {
-        fontFamily: 'var(--editor-font)',
-        lineHeight: '1.82',
+        fontFamily: 'var(--editor-font-family, var(--editor-font))',
+        lineHeight: 'var(--editor-line-height, 1.82)',
         overflow: 'auto',
       },
       '.cm-content': {

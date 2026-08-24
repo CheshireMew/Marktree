@@ -8,6 +8,7 @@ import {
   editorSourceText,
   sourceDocument,
   sourceLineSeparator,
+  SourceTextBuffer,
 } from '../src/lib/sourceText'
 
 const corpus = [
@@ -86,5 +87,41 @@ describe('source-faithful editor state', () => {
     expect(
       applyEditorChangesToSource(mixed, transaction.changes, detectLineSeparator(mixed)),
     ).toBe('# Edited\r\nLF line\nCR line\rLast')
+  })
+
+  it('updates CRLF projections incrementally across multiple edits', () => {
+    const source = 'first\r\nsecond\r\nthird\nfourth'
+    const state = EditorState.create({
+      doc: sourceDocument(source),
+      extensions: [sourceLineSeparator(source)],
+    })
+    const transaction = state.update({
+      changes: [
+        { from: 0, to: 5, insert: '1' },
+        {
+          from: state.doc.toString().indexOf('third'),
+          to: state.doc.toString().indexOf('third') + 5,
+          insert: sourceDocument('3\nthree'),
+        },
+      ],
+    })
+    const buffer = new SourceTextBuffer(source)
+
+    expect(buffer.apply(transaction.changes, '\r\n')).toBe(
+      '1\r\nsecond\r\n3\r\nthree\nfourth',
+    )
+    expect(buffer.sourceOffset(2)).toBe(3)
+    expect(buffer.editorOffset(3)).toBe(2)
+  })
+
+  it('keeps a multi-megabyte single edit responsive', () => {
+    const source = `${'line\r\n'.repeat(400_000)}tail`
+    const state = EditorState.create({ doc: sourceDocument(source) })
+    const buffer = new SourceTextBuffer(source)
+    const started = performance.now()
+    const transaction = state.update({ changes: { from: 0, to: 4, insert: 'head' } })
+
+    expect(buffer.apply(transaction.changes, '\r\n').endsWith('tail')).toBe(true)
+    expect(performance.now() - started).toBeLessThan(750)
   })
 })

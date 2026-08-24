@@ -6,7 +6,10 @@ use std::{
     sync::atomic::{AtomicU64, Ordering},
 };
 
-use crate::error::{AppError, AppResult};
+use crate::{
+    error::{AppError, AppResult},
+    file_version::{guard_expected_version, FileVersionGuard},
+};
 
 static TEMP_SEQUENCE: AtomicU64 = AtomicU64::new(0);
 
@@ -37,12 +40,39 @@ pub fn normalize_relative(value: &str) -> AppResult<String> {
     }
     if normalized.is_empty()
         || normalized
-            .first()
-            .is_some_and(|part| part.eq_ignore_ascii_case(".git"))
+            .iter()
+            .any(|part| part.eq_ignore_ascii_case(".git"))
     {
         return Err(AppError::InvalidPath(value));
     }
     Ok(normalized.join("/"))
+}
+
+pub fn normalize_content_relative(value: &str) -> AppResult<String> {
+    let relative = normalize_relative(value)?;
+    if relative
+        .split('/')
+        .any(|part| part.eq_ignore_ascii_case(".marktree"))
+    {
+        return Err(AppError::InvalidPath(relative));
+    }
+    Ok(relative)
+}
+
+pub(crate) fn portable_name_fragment(value: &str) -> String {
+    value
+        .trim()
+        .chars()
+        .map(|character| {
+            if character.is_alphanumeric() || matches!(character, '-' | '_') {
+                character
+            } else {
+                '-'
+            }
+        })
+        .collect::<String>()
+        .trim_matches('-')
+        .to_owned()
 }
 
 pub fn normalize_relative_paths(paths: &[String]) -> AppResult<Vec<String>> {
@@ -153,49 +183,354 @@ pub fn atomic_write(path: &Path, bytes: &[u8]) -> AppResult<()> {
     Ok(())
 }
 
-pub fn atomic_create(path: &Path, bytes: &[u8]) -> AppResult<()> {
+pub fn atomic_write_if_version(
+    path: &Path,
+    bytes: &[u8],
+    expected_sha256: Option<&str>,
+    expected_missing: bool,
+    operation_id: &str,
+) -> AppResult<()> {
+    atomic_write_if_version_with_hook(
+        path,
+        bytes,
+        expected_sha256,
+        expected_missing,
+        operation_id,
+        |_| {},
+    )
+}
+
+fn atomic_write_if_version_with_hook(
+    path: &Path,
+    bytes: &[u8],
+    expected_sha256: Option<&str>,
+    expected_missing: bool,
+    operation_id: &str,
+    after_guard: impl FnOnce(&FileVersionGuard),
+) -> AppResult<()> {
     let parent = path
         .parent()
         .ok_or_else(|| AppError::InvalidPath(path.display().to_string()))?;
     fs::create_dir_all(parent)?;
-    let mut file = OpenOptions::new().write(true).create_new(true).open(path)?;
+    let temporary = operation_copy_temporary_path(path, operation_id);
+    write_operation_temporary(&temporary, bytes)?;
+    publish_operation_temporary_with_hook(
+        &temporary,
+        path,
+        expected_sha256,
+        expected_missing,
+        false,
+        operation_id,
+        after_guard,
+    )?;
+    sync_parent(parent);
+    Ok(())
+}
+
+fn write_operation_temporary(path: &Path, bytes: &[u8]) -> AppResult<()> {
+    let mut file = OpenOptions::new()
+        .create(true)
+        .truncate(true)
+        .write(true)
+        .open(path)?;
     file.write_all(bytes)?;
     file.sync_all()?;
+    Ok(())
+}
+
+pub(crate) fn atomic_copy_if_version(
+    source: &Path,
+    destination: &Path,
+    expected_sha256: Option<&str>,
+    expected_missing: bool,
+    replace_existing: bool,
+    operation_id: &str,
+) -> AppResult<()> {
+    let parent = destination
+        .parent()
+        .ok_or_else(|| AppError::InvalidPath(destination.display().to_string()))?;
+    fs::create_dir_all(parent)?;
+    let temporary = operation_copy_temporary_path(destination, operation_id);
+    let mut input = OpenOptions::new().read(true).open(source)?;
+    let mut output = OpenOptions::new()
+        .create(true)
+        .truncate(true)
+        .write(true)
+        .open(&temporary)?;
+    std::io::copy(&mut input, &mut output)?;
+    output.sync_all()?;
+    drop(output);
+    publish_operation_temporary(
+        &temporary,
+        destination,
+        expected_sha256,
+        expected_missing,
+        replace_existing,
+        operation_id,
+    )?;
+    sync_parent(parent);
+    Ok(())
+}
+
+pub(crate) fn publish_operation_temporary(
+    temporary: &Path,
+    destination: &Path,
+    expected_sha256: Option<&str>,
+    expected_missing: bool,
+    replace_existing: bool,
+    operation_id: &str,
+) -> AppResult<()> {
+    publish_operation_temporary_with_hook(
+        temporary,
+        destination,
+        expected_sha256,
+        expected_missing,
+        replace_existing,
+        operation_id,
+        |_| {},
+    )
+}
+
+fn publish_operation_temporary_with_hook(
+    temporary: &Path,
+    destination: &Path,
+    expected_sha256: Option<&str>,
+    expected_missing: bool,
+    replace_existing: bool,
+    _operation_id: &str,
+    after_guard: impl FnOnce(&FileVersionGuard),
+) -> AppResult<()> {
+    if replace_existing {
+        return if destination.exists() {
+            replace_file(temporary, destination)
+        } else {
+            move_file_no_replace(temporary, destination)
+        };
+    }
+
+    let guard = guard_expected_version(destination, expected_sha256, expected_missing)?;
+    after_guard(&guard);
+    if guard.existing() {
+        #[cfg(target_os = "windows")]
+        {
+            drop(guard);
+            replace_file_if_unchanged(
+                temporary,
+                destination,
+                expected_sha256.ok_or(AppError::ExternalChange)?,
+                _operation_id,
+            )?;
+        }
+        #[cfg(not(target_os = "windows"))]
+        {
+            drop(guard);
+            guard_expected_version(destination, expected_sha256, expected_missing)?;
+            replace_file(temporary, destination)?;
+        }
+    } else {
+        move_file_no_replace(temporary, destination)?;
+        drop(guard);
+    }
+    Ok(())
+}
+
+pub(crate) fn operation_copy_temporary_path(destination: &Path, operation_id: &str) -> PathBuf {
+    let parent = destination.parent().unwrap_or_else(|| Path::new("."));
+    let file_name = destination
+        .file_name()
+        .and_then(|value| value.to_str())
+        .unwrap_or("marktree");
+    parent.join(format!(".{file_name}.marktree-{operation_id}.tmp"))
+}
+
+pub(crate) fn atomic_copy_for_operation(
+    source: &Path,
+    destination: &Path,
+    operation_id: &str,
+) -> AppResult<()> {
+    let parent = destination
+        .parent()
+        .ok_or_else(|| AppError::InvalidPath(destination.display().to_string()))?;
+    fs::create_dir_all(parent)?;
+    let temporary = operation_copy_temporary_path(destination, operation_id);
+    let result = (|| -> AppResult<()> {
+        let mut input = OpenOptions::new().read(true).open(source)?;
+        let mut output = OpenOptions::new()
+            .create(true)
+            .truncate(true)
+            .write(true)
+            .open(&temporary)?;
+        std::io::copy(&mut input, &mut output)?;
+        output.sync_all()?;
+        drop(output);
+        move_file_no_replace(&temporary, destination)
+    })();
+    // On error the deterministic temporary file is intentionally retained.
+    // Recovery owns this exact path and will truncate and reuse it on the next run.
+    result?;
+    sync_parent(parent);
+    Ok(())
+}
+
+fn sync_parent(parent: &Path) {
     if let Ok(directory) = OpenOptions::new().read(true).open(parent) {
         let _ = directory.sync_all();
+    }
+}
+
+#[cfg(target_os = "windows")]
+fn replace_file(source: &Path, destination: &Path) -> AppResult<()> {
+    use windows_sys::Win32::Storage::FileSystem::{
+        MOVEFILE_REPLACE_EXISTING, MOVEFILE_WRITE_THROUGH,
+    };
+
+    move_file_with_flags(
+        source,
+        destination,
+        MOVEFILE_REPLACE_EXISTING | MOVEFILE_WRITE_THROUGH,
+    )
+}
+
+#[cfg(target_os = "windows")]
+fn replace_file_if_unchanged(
+    source: &Path,
+    destination: &Path,
+    expected_sha256: &str,
+    operation_id: &str,
+) -> AppResult<()> {
+    use windows_sys::Win32::Storage::FileSystem::{ReplaceFileW, REPLACEFILE_WRITE_THROUGH};
+
+    let (backup, rejected) = conditional_write_artifact_paths(destination, operation_id)?;
+    let destination_wide = windows_path(destination);
+    let source_wide = windows_path(source);
+    let backup_wide = windows_path(&backup);
+    let result = unsafe {
+        ReplaceFileW(
+            destination_wide.as_ptr(),
+            source_wide.as_ptr(),
+            backup_wide.as_ptr(),
+            REPLACEFILE_WRITE_THROUGH,
+            std::ptr::null(),
+            std::ptr::null(),
+        )
+    };
+    if result == 0 {
+        return Err(std::io::Error::last_os_error().into());
+    }
+    if crate::file_version::hash_file(&backup)? == expected_sha256 {
+        fs::remove_file(backup)?;
+        return Ok(());
+    }
+
+    let rejected_wide = windows_path(&rejected);
+    let rollback = unsafe {
+        ReplaceFileW(
+            destination_wide.as_ptr(),
+            backup_wide.as_ptr(),
+            rejected_wide.as_ptr(),
+            REPLACEFILE_WRITE_THROUGH,
+            std::ptr::null(),
+            std::ptr::null(),
+        )
+    };
+    if rollback == 0 {
+        return Err(std::io::Error::last_os_error().into());
+    }
+    fs::remove_file(rejected)?;
+    Err(AppError::ExternalChange)
+}
+
+#[cfg(target_os = "windows")]
+pub(crate) fn conditional_write_artifact_paths(
+    destination: &Path,
+    operation_id: &str,
+) -> AppResult<(PathBuf, PathBuf)> {
+    let parent = destination
+        .parent()
+        .ok_or_else(|| AppError::InvalidPath(destination.display().to_string()))?;
+    let file_name = destination
+        .file_name()
+        .and_then(|value| value.to_str())
+        .unwrap_or("marktree");
+    Ok((
+        parent.join(format!(".{file_name}.marktree-{operation_id}.previous")),
+        parent.join(format!(".{file_name}.marktree-{operation_id}.rejected")),
+    ))
+}
+
+#[cfg(target_os = "windows")]
+pub(crate) fn restore_conditional_write_backup(
+    destination: &Path,
+    backup: &Path,
+    rejected: &Path,
+) -> AppResult<()> {
+    use windows_sys::Win32::Storage::FileSystem::{ReplaceFileW, REPLACEFILE_WRITE_THROUGH};
+
+    if rejected.exists() {
+        return Err(AppError::Message(format!(
+            "The conditional-write recovery path '{}' already exists.",
+            rejected.display()
+        )));
+    }
+    let destination_wide = windows_path(destination);
+    let backup_wide = windows_path(backup);
+    let rejected_wide = windows_path(rejected);
+    let result = unsafe {
+        ReplaceFileW(
+            destination_wide.as_ptr(),
+            backup_wide.as_ptr(),
+            rejected_wide.as_ptr(),
+            REPLACEFILE_WRITE_THROUGH,
+            std::ptr::null(),
+            std::ptr::null(),
+        )
+    };
+    if result == 0 {
+        return Err(std::io::Error::last_os_error().into());
+    }
+    if let Some(parent) = destination.parent() {
+        sync_parent(parent);
     }
     Ok(())
 }
 
 #[cfg(target_os = "windows")]
-fn replace_file(source: &Path, destination: &Path) -> AppResult<()> {
-    use std::os::windows::ffi::OsStrExt;
-    use windows_sys::Win32::Storage::FileSystem::{
-        MoveFileExW, MOVEFILE_REPLACE_EXISTING, MOVEFILE_WRITE_THROUGH,
-    };
+fn move_file_no_replace(source: &Path, destination: &Path) -> AppResult<()> {
+    use windows_sys::Win32::Storage::FileSystem::MOVEFILE_WRITE_THROUGH;
 
-    let source: Vec<u16> = source.as_os_str().encode_wide().chain(Some(0)).collect();
-    let destination: Vec<u16> = destination
-        .as_os_str()
-        .encode_wide()
-        .chain(Some(0))
-        .collect();
-    let result = unsafe {
-        MoveFileExW(
-            source.as_ptr(),
-            destination.as_ptr(),
-            MOVEFILE_REPLACE_EXISTING | MOVEFILE_WRITE_THROUGH,
-        )
-    };
+    move_file_with_flags(source, destination, MOVEFILE_WRITE_THROUGH)
+}
+
+#[cfg(target_os = "windows")]
+fn move_file_with_flags(source: &Path, destination: &Path, flags: u32) -> AppResult<()> {
+    use windows_sys::Win32::Storage::FileSystem::MoveFileExW;
+
+    let source = windows_path(source);
+    let destination = windows_path(destination);
+    let result = unsafe { MoveFileExW(source.as_ptr(), destination.as_ptr(), flags) };
     if result == 0 {
         return Err(std::io::Error::last_os_error().into());
     }
     Ok(())
 }
 
+#[cfg(target_os = "windows")]
+fn windows_path(path: &Path) -> Vec<u16> {
+    use std::os::windows::ffi::OsStrExt;
+
+    path.as_os_str().encode_wide().chain(Some(0)).collect()
+}
+
 #[cfg(not(target_os = "windows"))]
 fn replace_file(source: &Path, destination: &Path) -> AppResult<()> {
     fs::rename(source, destination)?;
+    Ok(())
+}
+
+#[cfg(not(target_os = "windows"))]
+fn move_file_no_replace(source: &Path, destination: &Path) -> AppResult<()> {
+    fs::hard_link(source, destination)?;
+    fs::remove_file(source)?;
     Ok(())
 }
 
@@ -214,6 +549,12 @@ mod tests {
         assert!(normalize_relative("C:\\secret.md").is_err());
         assert!(normalize_relative(".git/config").is_err());
         assert!(normalize_relative(".GIT/config").is_err());
+        assert!(normalize_relative("nested/.git/config").is_err());
+        assert!(normalize_content_relative("nested/.MARKTREE/config.json").is_err());
+        assert_eq!(
+            normalize_relative(".marktree/config.json").unwrap(),
+            ".marktree/config.json"
+        );
     }
 
     #[test]
@@ -241,12 +582,77 @@ mod tests {
     }
 
     #[test]
-    fn atomic_create_never_replaces_an_existing_file() {
+    fn operation_write_never_replaces_an_existing_file_when_missing_was_expected() {
         let directory = TempDir::new().unwrap();
         let path = directory.path().join("document.md");
-        atomic_create(&path, b"first").unwrap();
+        fs::write(&path, b"first").unwrap();
 
-        assert!(atomic_create(&path, b"second").is_err());
+        assert!(atomic_write_if_version(&path, b"second", None, true, "create-test").is_err());
         assert_eq!(fs::read(path).unwrap(), b"first");
+    }
+
+    #[test]
+    fn conditional_write_rejects_a_change_before_the_commit_guard() {
+        let directory = TempDir::new().unwrap();
+        let path = directory.path().join("document.md");
+        fs::write(&path, b"original").unwrap();
+        let expected = crate::file_version::hash_bytes(b"original");
+        fs::write(&path, b"external").unwrap();
+
+        let error =
+            atomic_write_if_version(&path, b"marktree", Some(&expected), false, "test-race")
+                .unwrap_err();
+
+        assert!(matches!(error, AppError::ExternalChange));
+        assert_eq!(fs::read(path).unwrap(), b"external");
+    }
+
+    #[cfg(target_os = "windows")]
+    #[test]
+    fn conditional_write_guard_blocks_a_writer_during_publish() {
+        let directory = TempDir::new().unwrap();
+        let path = directory.path().join("document.md");
+        fs::write(&path, b"original").unwrap();
+        let expected = crate::file_version::hash_bytes(b"original");
+        let attempted_path = path.clone();
+        let mut writer_was_blocked = false;
+
+        atomic_write_if_version_with_hook(
+            &path,
+            b"marktree",
+            Some(&expected),
+            false,
+            "test-guard",
+            |_| writer_was_blocked = fs::write(&attempted_path, b"external").is_err(),
+        )
+        .unwrap();
+
+        assert!(writer_was_blocked);
+        assert_eq!(fs::read(path).unwrap(), b"marktree");
+    }
+
+    #[cfg(target_os = "windows")]
+    #[test]
+    fn conditional_replace_rolls_back_a_version_that_won_the_release_race() {
+        let directory = TempDir::new().unwrap();
+        let path = directory.path().join("document.md");
+        let replacement = directory.path().join("replacement.tmp");
+        fs::write(&path, b"external winner").unwrap();
+        fs::write(&replacement, b"marktree").unwrap();
+
+        let error = replace_file_if_unchanged(
+            &replacement,
+            &path,
+            &crate::file_version::hash_bytes(b"original"),
+            "rollback-race",
+        )
+        .unwrap_err();
+
+        assert!(matches!(error, AppError::ExternalChange));
+        assert_eq!(fs::read(path).unwrap(), b"external winner");
+        assert!(!directory
+            .path()
+            .join(".document.md.marktree-rollback-race.rejected")
+            .exists());
     }
 }

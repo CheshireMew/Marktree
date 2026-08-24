@@ -4,38 +4,57 @@
 import { invoke } from '@tauri-apps/api/core'
 
 import type {
-  AssetPreview,
+  AndroidShareImportResult,
+  AssetUploadChunkRequest,
+  AssetUploadTicket,
   AssetWriteResult,
   AuthConfiguration,
+  BeginAssetUploadRequest,
   BranchDescriptor,
   ConflictChoice,
-  ConflictRecord,
   CreateWorktreeRequest,
   CredentialInput,
   DiffMode,
   DiffResult,
   DocumentContent,
+  DocumentSearchRequest,
+  DocumentSearchResponse,
+  DuplicateWorkspaceEntryRequest,
   GitBaselinePreview,
   GitStatusSnapshot,
   GithubDeviceCode,
   GithubDeviceToken,
-  LocalStateSnapshot,
+  ImportAndroidShareRequest,
   MoveWorkspaceEntryRequest,
-  PendingGitOperation,
+  OperationLogEntry,
+  PendingAndroidShare,
+  PendingGitOperationSummary,
+  SafeInteger,
   SaveDocumentRequest,
   SaveDocumentResult,
   SaveWorkspaceConfigRequest,
+  StartupState,
   SyncPlan,
   SyncResult,
   TextComparison,
   TrashEntry,
+  WorkspaceArchiveExportResult,
   WorkspaceConfigSnapshot,
   WorkspaceDescriptor,
-  WorkspaceEntry,
+  WorkspaceEntriesPatch,
+  WorkspaceEntryDuplicateResult,
   WorkspaceEntryMoveResult,
+  WorkspaceFilePreview,
+  WorkspaceRefreshSnapshot,
+  WorkspaceViewSnapshot,
   WorktreeDescriptor,
-  WorktreeSearchResult,
+  WorktreeSearchRequest,
+  WorktreeSearchResponse,
 } from './native'
+
+export interface ReadOperationLogArgs extends Record<string, unknown> {
+  limit: SafeInteger
+}
 
 export interface OpenWorkspaceArgs extends Record<string, unknown> {
   path: string
@@ -73,19 +92,16 @@ export interface ForgetWorkspaceArgs extends Record<string, unknown> {
   root: string
 }
 
-export interface RefreshWorkspaceArgs extends Record<string, unknown> {
-  root: string
+export interface RefreshWorkspaceViewArgs extends Record<string, unknown> {
+  workspaceRoot: string
+  contentRoot: string
 }
 
 export interface WatchWorkspaceArgs extends Record<string, unknown> {
   root: string
 }
 
-export interface WorkspaceGitStatusArgs extends Record<string, unknown> {
-  root: string
-}
-
-export interface ListBranchesArgs extends Record<string, unknown> {
+export interface UnwatchWorkspaceArgs extends Record<string, unknown> {
   root: string
 }
 
@@ -110,8 +126,21 @@ export interface CreateWorktreeArgs extends Record<string, unknown> {
   request: CreateWorktreeRequest
 }
 
-export interface ListWorkspaceEntriesArgs extends Record<string, unknown> {
+export interface WorkspaceViewArgs extends Record<string, unknown> {
   root: string
+}
+
+export interface ListWorkspaceDirectoriesArgs extends Record<string, unknown> {
+  root: string
+}
+
+export interface WorkspaceEntriesPatchArgs extends Record<string, unknown> {
+  root: string
+  paths: string[]
+}
+
+export interface CancelSearchesArgs extends Record<string, unknown> {
+  roots: string[]
 }
 
 export interface ReadDocumentArgs extends Record<string, unknown> {
@@ -124,7 +153,7 @@ export interface OpenDocumentArgs extends Record<string, unknown> {
   path: string
 }
 
-export interface ReadAssetArgs extends Record<string, unknown> {
+export interface ReadWorkspacePreviewArgs extends Record<string, unknown> {
   root: string
   path: string
 }
@@ -146,18 +175,24 @@ export interface SaveWorkspaceConfigArgs extends Record<string, unknown> {
   request: SaveWorkspaceConfigRequest
 }
 
-export interface WriteAssetArgs extends Record<string, unknown> {
-  root: string
-  documentPath: string
-  fileName: string
-  base64Data: string
-  assetsDir: string | null
+export interface BeginAssetUploadArgs extends Record<string, unknown> {
+  request: BeginAssetUploadRequest
+}
+
+export interface AppendAssetUploadArgs extends Record<string, unknown> {
+  request: AssetUploadChunkRequest
+}
+
+export interface FinishAssetUploadArgs extends Record<string, unknown> {
+  uploadId: string
+}
+
+export interface AbortAssetUploadArgs extends Record<string, unknown> {
+  uploadId: string
 }
 
 export interface SearchDocumentsArgs extends Record<string, unknown> {
-  root: string
-  query: string
-  limit: number
+  request: DocumentSearchRequest
 }
 
 export interface CreateWorkspaceFolderArgs extends Record<string, unknown> {
@@ -167,6 +202,10 @@ export interface CreateWorkspaceFolderArgs extends Record<string, unknown> {
 
 export interface MoveWorkspaceEntryArgs extends Record<string, unknown> {
   request: MoveWorkspaceEntryRequest
+}
+
+export interface DuplicateWorkspaceEntryArgs extends Record<string, unknown> {
+  request: DuplicateWorkspaceEntryRequest
 }
 
 export interface TrashWorkspaceEntryArgs extends Record<string, unknown> {
@@ -183,10 +222,16 @@ export interface OpenWorkspaceFileWithSystemArgs extends Record<string, unknown>
   path: string
 }
 
-export interface SearchWorktreesArgs extends Record<string, unknown> {
+export interface ImportAndroidShareArgs extends Record<string, unknown> {
+  request: ImportAndroidShareRequest
+}
+
+export interface ExportAndroidWorkspaceArchiveArgs extends Record<string, unknown> {
   root: string
-  query: string
-  limit: number
+}
+
+export interface SearchWorktreesArgs extends Record<string, unknown> {
+  request: WorktreeSearchRequest
 }
 
 export interface StagePathsArgs extends Record<string, unknown> {
@@ -253,10 +298,6 @@ export interface ResolveConflictWithContentArgs extends Record<string, unknown> 
   content: string
 }
 
-export interface PendingConflictsArgs extends Record<string, unknown> {
-  root: string
-}
-
 export interface PendingGitOperationArgs extends Record<string, unknown> {
   root: string
 }
@@ -285,7 +326,8 @@ export interface PollGithubDeviceFlowArgs extends Record<string, unknown> {
 export const isTauri = () => '__TAURI_INTERNALS__' in window
 
 export const nativeApi = {
-  getLocalState: () => invoke<LocalStateSnapshot>('get_local_state'),
+  getStartupState: () => invoke<StartupState>('get_startup_state'),
+  readOperationLog: (args: ReadOperationLogArgs) => invoke<OperationLogEntry[]>('read_operation_log', args),
   openWorkspace: (args: OpenWorkspaceArgs) => invoke<WorkspaceDescriptor>('open_workspace', args),
   createWorkspace: (args: CreateWorkspaceArgs) => invoke<WorkspaceDescriptor>('create_workspace', args),
   cloneGitWorkspace: (args: CloneGitWorkspaceArgs) => invoke<WorkspaceDescriptor>('clone_git_workspace', args),
@@ -294,47 +336,55 @@ export const nativeApi = {
   previewWorkspaceGitBaseline: (args: PreviewWorkspaceGitBaselineArgs) => invoke<GitBaselinePreview>('preview_workspace_git_baseline', args),
   enableWorkspaceGit: (args: EnableWorkspaceGitArgs) => invoke<WorkspaceDescriptor>('enable_workspace_git', args),
   forgetWorkspace: (args: ForgetWorkspaceArgs) => invoke<void>('forget_workspace', args),
-  refreshWorkspace: (args: RefreshWorkspaceArgs) => invoke<WorkspaceDescriptor>('refresh_workspace', args),
+  refreshWorkspaceView: (args: RefreshWorkspaceViewArgs) => invoke<WorkspaceRefreshSnapshot>('refresh_workspace_view', args),
   watchWorkspace: (args: WatchWorkspaceArgs) => invoke<void>('watch_workspace', args),
-  workspaceGitStatus: (args: WorkspaceGitStatusArgs) => invoke<GitStatusSnapshot>('workspace_git_status', args),
-  listBranches: (args: ListBranchesArgs) => invoke<BranchDescriptor[]>('list_branches', args),
-  createBranch: (args: CreateBranchArgs) => invoke<GitStatusSnapshot>('create_branch', args),
-  checkoutBranch: (args: CheckoutBranchArgs) => invoke<GitStatusSnapshot>('checkout_branch', args),
+  unwatchWorkspace: (args: UnwatchWorkspaceArgs) => invoke<void>('unwatch_workspace', args),
+  createBranch: (args: CreateBranchArgs) => invoke<WorkspaceViewSnapshot>('create_branch', args),
+  checkoutBranch: (args: CheckoutBranchArgs) => invoke<WorkspaceViewSnapshot>('checkout_branch', args),
   deleteBranch: (args: DeleteBranchArgs) => invoke<BranchDescriptor[]>('delete_branch', args),
   createWorktree: (args: CreateWorktreeArgs) => invoke<WorktreeDescriptor>('create_worktree', args),
-  listWorkspaceEntries: (args: ListWorkspaceEntriesArgs) => invoke<WorkspaceEntry[]>('list_workspace_entries', args),
+  workspaceView: (args: WorkspaceViewArgs) => invoke<WorkspaceViewSnapshot>('workspace_view', args),
+  listWorkspaceDirectories: (args: ListWorkspaceDirectoriesArgs) => invoke<string[]>('list_workspace_directories', args),
+  workspaceEntriesPatch: (args: WorkspaceEntriesPatchArgs) => invoke<WorkspaceEntriesPatch>('workspace_entries_patch', args),
+  cancelSearches: (args: CancelSearchesArgs) => invoke<void>('cancel_searches', args),
   readDocument: (args: ReadDocumentArgs) => invoke<DocumentContent>('read_document', args),
   openDocument: (args: OpenDocumentArgs) => invoke<DocumentContent>('open_document', args),
-  readAsset: (args: ReadAssetArgs) => invoke<AssetPreview>('read_asset', args),
+  readWorkspacePreview: (args: ReadWorkspacePreviewArgs) => invoke<WorkspaceFilePreview>('read_workspace_preview', args),
   saveDocument: (args: SaveDocumentArgs) => invoke<SaveDocumentResult>('save_document', args),
   createDocument: (args: CreateDocumentArgs) => invoke<DocumentContent>('create_document', args),
   readWorkspaceConfig: (args: ReadWorkspaceConfigArgs) => invoke<WorkspaceConfigSnapshot>('read_workspace_config', args),
   saveWorkspaceConfig: (args: SaveWorkspaceConfigArgs) => invoke<WorkspaceConfigSnapshot>('save_workspace_config', args),
-  writeAsset: (args: WriteAssetArgs) => invoke<AssetWriteResult>('write_asset', args),
-  searchDocuments: (args: SearchDocumentsArgs) => invoke<string[]>('search_documents', args),
+  beginAssetUpload: (args: BeginAssetUploadArgs) => invoke<AssetUploadTicket>('begin_asset_upload', args),
+  appendAssetUpload: (args: AppendAssetUploadArgs) => invoke<void>('append_asset_upload', args),
+  finishAssetUpload: (args: FinishAssetUploadArgs) => invoke<AssetWriteResult>('finish_asset_upload', args),
+  abortAssetUpload: (args: AbortAssetUploadArgs) => invoke<void>('abort_asset_upload', args),
+  searchDocuments: (args: SearchDocumentsArgs) => invoke<DocumentSearchResponse>('search_documents', args),
   createWorkspaceFolder: (args: CreateWorkspaceFolderArgs) => invoke<string>('create_workspace_folder', args),
   moveWorkspaceEntry: (args: MoveWorkspaceEntryArgs) => invoke<WorkspaceEntryMoveResult>('move_workspace_entry', args),
+  duplicateWorkspaceEntry: (args: DuplicateWorkspaceEntryArgs) => invoke<WorkspaceEntryDuplicateResult>('duplicate_workspace_entry', args),
   trashWorkspaceEntry: (args: TrashWorkspaceEntryArgs) => invoke<TrashEntry | null>('trash_workspace_entry', args),
   listWorkspaceTrash: () => invoke<TrashEntry[]>('list_workspace_trash'),
   restoreWorkspaceTrash: (args: RestoreWorkspaceTrashArgs) => invoke<TrashEntry>('restore_workspace_trash', args),
   emptyWorkspaceTrash: () => invoke<void>('empty_workspace_trash'),
   openWorkspaceFileWithSystem: (args: OpenWorkspaceFileWithSystemArgs) => invoke<void>('open_workspace_file_with_system', args),
-  searchWorktrees: (args: SearchWorktreesArgs) => invoke<WorktreeSearchResult[]>('search_worktrees', args),
-  stagePaths: (args: StagePathsArgs) => invoke<GitStatusSnapshot>('stage_paths', args),
-  stageAll: (args: StageAllArgs) => invoke<GitStatusSnapshot>('stage_all', args),
-  unstagePaths: (args: UnstagePathsArgs) => invoke<GitStatusSnapshot>('unstage_paths', args),
-  commit: (args: CommitArgs) => invoke<string>('commit', args),
-  fetch: (args: FetchArgs) => invoke<GitStatusSnapshot>('fetch', args),
+  takePendingAndroidShare: () => invoke<PendingAndroidShare | null>('take_pending_android_share'),
+  importAndroidShare: (args: ImportAndroidShareArgs) => invoke<AndroidShareImportResult>('import_android_share', args),
+  exportAndroidWorkspaceArchive: (args: ExportAndroidWorkspaceArchiveArgs) => invoke<WorkspaceArchiveExportResult>('export_android_workspace_archive', args),
+  searchWorktrees: (args: SearchWorktreesArgs) => invoke<WorktreeSearchResponse>('search_worktrees', args),
+  stagePaths: (args: StagePathsArgs) => invoke<WorkspaceViewSnapshot>('stage_paths', args),
+  stageAll: (args: StageAllArgs) => invoke<WorkspaceViewSnapshot>('stage_all', args),
+  unstagePaths: (args: UnstagePathsArgs) => invoke<WorkspaceViewSnapshot>('unstage_paths', args),
+  commit: (args: CommitArgs) => invoke<WorkspaceViewSnapshot>('commit', args),
+  fetch: (args: FetchArgs) => invoke<void>('fetch', args),
   pullRebase: (args: PullRebaseArgs) => invoke<SyncResult>('pull_rebase', args),
-  push: (args: PushArgs) => invoke<GitStatusSnapshot>('push', args),
+  push: (args: PushArgs) => invoke<void>('push', args),
   gitDiff: (args: GitDiffArgs) => invoke<DiffResult>('git_diff', args),
   compareWorktrees: (args: CompareWorktreesArgs) => invoke<TextComparison>('compare_worktrees', args),
   syncPlan: (args: SyncPlanArgs) => invoke<SyncPlan>('sync_plan', args),
   syncWorkspaceChanges: (args: SyncWorkspaceChangesArgs) => invoke<SyncResult>('sync_workspace_changes', args),
   resolveConflict: (args: ResolveConflictArgs) => invoke<void>('resolve_conflict', args),
   resolveConflictWithContent: (args: ResolveConflictWithContentArgs) => invoke<void>('resolve_conflict_with_content', args),
-  pendingConflicts: (args: PendingConflictsArgs) => invoke<ConflictRecord[]>('pending_conflicts', args),
-  pendingGitOperation: (args: PendingGitOperationArgs) => invoke<PendingGitOperation | null>('pending_git_operation', args),
+  pendingGitOperation: (args: PendingGitOperationArgs) => invoke<PendingGitOperationSummary | null>('pending_git_operation', args),
   resumeGitOperation: (args: ResumeGitOperationArgs) => invoke<SyncResult>('resume_git_operation', args),
   abortGitOperation: (args: AbortGitOperationArgs) => invoke<GitStatusSnapshot>('abort_git_operation', args),
   saveCredential: (args: SaveCredentialArgs) => invoke<void>('save_credential', args),

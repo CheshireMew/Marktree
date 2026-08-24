@@ -4,6 +4,7 @@ use serde::{Deserialize, Serialize};
 
 use crate::{
     error::{AppError, AppResult},
+    state::PersistentState,
     types::{CredentialInput, CredentialRecord, GithubDeviceCode, GithubDeviceToken},
 };
 
@@ -31,6 +32,17 @@ pub fn load_credential(id: &str) -> AppResult<CredentialRecord> {
         .get_secret()
         .map_err(|error| AppError::Credential(error.to_string()))?;
     Ok(serde_json::from_slice(&secret)?)
+}
+
+pub fn credential_for_workspace(
+    root: &str,
+    state: &PersistentState,
+) -> AppResult<Option<CredentialRecord>> {
+    state
+        .credential_ref(&crate::git::repository_lock_key(root))?
+        .as_deref()
+        .map(load_credential)
+        .transpose()
 }
 
 pub async fn begin_github_device_flow(client_id: &str) -> AppResult<GithubDeviceCode> {

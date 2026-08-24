@@ -1,5 +1,6 @@
-use tauri::State;
+use tauri::{AppHandle, Manager};
 
+use super::support::run_blocking;
 use crate::{
     auth,
     error::AppResult,
@@ -8,32 +9,36 @@ use crate::{
     types::{CredentialInput, GithubDeviceCode, GithubDeviceToken},
 };
 
-#[tauri::command(async)]
-pub fn save_credential(input: CredentialInput) -> AppResult<()> {
-    auth::save_credential(input)
+#[tauri::command]
+pub async fn save_credential(input: CredentialInput) -> AppResult<()> {
+    run_blocking(move || auth::save_credential(input)).await
 }
 
-#[tauri::command(async)]
-pub fn set_workspace_git_credential(
+#[tauri::command]
+pub async fn set_workspace_git_credential(
     root: String,
     credential_id: String,
-    state: State<'_, PersistentState>,
+    app: AppHandle,
 ) -> AppResult<()> {
-    auth::load_credential(&credential_id)?;
-    state.set_credential_ref(&git::repository_lock_key(&root), &credential_id)
+    run_blocking(move || {
+        auth::load_credential(&credential_id)?;
+        app.state::<PersistentState>()
+            .set_credential_ref(&git::repository_lock_key(&root), &credential_id)
+    })
+    .await
 }
 
-#[tauri::command(async)]
-pub fn auth_configuration() -> auth::AuthConfiguration {
+#[tauri::command]
+pub async fn auth_configuration() -> auth::AuthConfiguration {
     auth::configuration()
 }
 
-#[tauri::command(async)]
+#[tauri::command]
 pub async fn begin_github_device_flow() -> AppResult<GithubDeviceCode> {
     auth::begin_github_device_flow(&auth::configured_github_client_id()).await
 }
 
-#[tauri::command(async)]
+#[tauri::command]
 pub async fn poll_github_device_flow(device_code: String) -> AppResult<GithubDeviceToken> {
     auth::poll_github_device_flow(&auth::configured_github_client_id(), &device_code).await
 }

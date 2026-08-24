@@ -5,6 +5,7 @@ use std::{
 
 use crate::{
     error::{AppError, AppResult},
+    paths::paths_equal,
     types::{
         CredentialRecord, GitCapability, GitFileStatus, GitStatusSnapshot, WorktreeDescriptor,
     },
@@ -18,7 +19,7 @@ use git2::{
 use super::remote::{fetch_options, remote_url, validate_remote_url};
 
 pub fn repository_lock_key(path: &str) -> String {
-    let repository = Repository::open(path).ok();
+    let repository = open_exact_repository(path).ok();
     let resolved = repository
         .as_ref()
         .and_then(|repo| fs::canonicalize(repo.commondir()).ok())
@@ -39,14 +40,53 @@ pub fn repository_lock_key(path: &str) -> String {
 }
 
 pub fn has_git_capability(path: &str) -> bool {
-    Path::new(path).join(".git").exists() && Repository::open(path).is_ok()
+    open_exact_repository(path).is_ok()
 }
 
 pub fn git_capability(path: &str) -> AppResult<Option<GitCapability>> {
     if !Path::new(path).join(".git").exists() {
         return Ok(None);
     }
-    Ok(Some(capability(&Repository::open(path)?)?))
+    Ok(Some(capability(&open_exact_repository(path)?)?))
+}
+
+pub fn git_capability_metadata(path: &str) -> AppResult<Option<GitCapability>> {
+    if !Path::new(path).join(".git").exists() {
+        return Ok(None);
+    }
+    Ok(Some(capability_with_status(
+        &open_exact_repository(path)?,
+        false,
+    )?))
+}
+
+pub(super) fn open_exact_repository(root: &str) -> AppResult<Repository> {
+    open_exact_repository_path(Path::new(root))
+}
+
+pub(super) fn open_exact_repository_path(root: &Path) -> AppResult<Repository> {
+    let requested_root = fs::canonicalize(root)?;
+    if !requested_root.is_dir() || !requested_root.join(".git").exists() {
+        return Err(AppError::Message(format!(
+            "The workspace root '{}' does not own a Git repository.",
+            root.display()
+        )));
+    }
+    let repository = Repository::open(&requested_root)?;
+    let repository_root = repository
+        .workdir()
+        .ok_or_else(|| AppError::Message("A bare repository is not a workspace.".to_owned()))?;
+    if !paths_equal(
+        requested_root.to_string_lossy().as_ref(),
+        repository_root.to_string_lossy().as_ref(),
+    ) {
+        return Err(AppError::Message(format!(
+            "Git resolved '{}' to a different repository root '{}'.",
+            requested_root.display(),
+            repository_root.display()
+        )));
+    }
+    Ok(repository)
 }
 
 pub fn initialize_repository(path: &str) -> AppResult<GitCapability> {
@@ -71,21 +111,27 @@ pub fn clone_repository(
 }
 
 pub fn refresh_repository(root: &str) -> AppResult<GitCapability> {
-    capability(&Repository::open(root)?)
+    capability(&open_exact_repository(root)?)
 }
 
 pub fn repository_status(root: &str) -> AppResult<GitStatusSnapshot> {
-    status_snapshot(&Repository::open(root)?)
+    status_snapshot(&open_exact_repository(root)?)
 }
 
 fn capability(repo: &Repository) -> AppResult<GitCapability> {
+    capability_with_status(repo, true)
+}
+
+fn capability_with_status(repo: &Repository, include_status: bool) -> AppResult<GitCapability> {
     let main = main_repository(repo)?;
     let main_root = workdir_string(&main)?;
-    let mut worktrees = vec![descriptor_for_worktree(
+    let current_root = workdir_string(repo)?;
+    let mut worktrees = vec![descriptor_for_worktree_with_status(
         "main",
         Path::new(&main_root),
         true,
         false,
+        include_status,
     )?];
     let worktree_names = main.worktrees()?;
     for item in worktree_names.iter() {
@@ -94,11 +140,12 @@ fn capability(repo: &Repository) -> AppResult<GitCapability> {
         };
         let worktree = main.find_worktree(name)?;
         let locked = worktree.is_locked()? != WorktreeLockStatus::Unlocked;
-        worktrees.push(descriptor_for_worktree(
+        worktrees.push(descriptor_for_worktree_with_status(
             name,
             worktree.path(),
             false,
             locked,
+            include_status,
         )?);
     }
     worktrees.sort_by(|left, right| {
@@ -110,10 +157,18 @@ fn capability(repo: &Repository) -> AppResult<GitCapability> {
     let common_dir = fs::canonicalize(main.commondir())?
         .to_string_lossy()
         .into_owned();
+    let active = worktrees
+        .iter()
+        .find(|worktree| paths_equal(&worktree.path, &current_root))
+        .ok_or_else(|| {
+            AppError::Message(format!(
+                "The active worktree '{current_root}' is missing from its repository descriptor."
+            ))
+        })?;
     Ok(GitCapability {
         common_dir,
         remote_url: remote_url(&main),
-        status: status_snapshot(repo)?,
+        status: active.status.clone(),
         worktrees,
     })
 }
@@ -124,7 +179,17 @@ pub(super) fn descriptor_for_worktree(
     is_main: bool,
     is_locked: bool,
 ) -> AppResult<WorktreeDescriptor> {
-    let repo = Repository::open(path)?;
+    descriptor_for_worktree_with_status(name, path, is_main, is_locked, true)
+}
+
+fn descriptor_for_worktree_with_status(
+    name: &str,
+    path: &Path,
+    is_main: bool,
+    is_locked: bool,
+    include_status: bool,
+) -> AppResult<WorktreeDescriptor> {
+    let repo = open_exact_repository_path(path)?;
     Ok(WorktreeDescriptor {
         name: name.to_owned(),
         path: workdir_string(&repo)?,
@@ -132,7 +197,7 @@ pub(super) fn descriptor_for_worktree(
         is_main,
         is_locked,
         is_detached: repo.head_detached()?,
-        status: status_snapshot(&repo)?,
+        status: include_status.then(|| status_snapshot(&repo)).transpose()?,
     })
 }
 
@@ -169,6 +234,12 @@ pub(super) fn status_snapshot(repo: &Repository) -> AppResult<GitStatusSnapshot>
             .unwrap_or_default()
             .replace('\\', "/");
         if path.is_empty() {
+            continue;
+        }
+        if path
+            .split('/')
+            .any(crate::content_policy::is_internal_transaction_file_name)
+        {
             continue;
         }
         files.push(GitFileStatus {
@@ -259,7 +330,7 @@ pub(super) fn main_repository(repo: &Repository) -> AppResult<Repository> {
     let main_root = common_dir
         .parent()
         .ok_or_else(|| AppError::InvalidPath(common_dir.display().to_string()))?;
-    Ok(Repository::open(main_root)?)
+    open_exact_repository_path(main_root)
 }
 
 pub(super) fn signature(repo: &Repository) -> AppResult<Signature<'static>> {
@@ -337,5 +408,29 @@ pub(super) fn worktree_status(status: Status) -> &'static str {
         "modified"
     } else {
         "clean"
+    }
+}
+
+#[cfg(test)]
+mod transaction_artifact_tests {
+    use super::*;
+
+    #[test]
+    fn git_status_never_reports_operation_owned_workspace_files() {
+        let directory = tempfile::TempDir::new().unwrap();
+        let repository = Repository::init(directory.path()).unwrap();
+        fs::write(directory.path().join("note.md"), b"visible").unwrap();
+        fs::write(
+            directory
+                .path()
+                .join(".note.md.marktree-0123456789abcdef01234567.tmp"),
+            b"staged",
+        )
+        .unwrap();
+
+        let status = status_snapshot(&repository).unwrap();
+
+        assert_eq!(status.files.len(), 1);
+        assert_eq!(status.files[0].path, "note.md");
     }
 }

@@ -1,17 +1,18 @@
 import { isTauri, nativeApi } from '@/lib/api'
 import { saveEditorTabUntilStable } from '@/lib/documentSaveCoordinator'
 import { readableError } from '@/lib/errors'
+import { editorTabIsDirty, retainedDiskContent } from '@/lib/documentMemory'
 import type { EditorTab, UnsavedComparison, WorkspaceEntry } from '@/types'
+import { waitForTabUploads } from './uploads'
 
 import {
-  activeWorkspace,
   activeTab,
   externalComparison,
   externalComparisons,
+  persistSessionPaths,
   sessions,
   setError,
   tabKey,
-  updateWorktreeStatus,
   type WorkspaceSession,
 } from './state'
 
@@ -23,7 +24,7 @@ export function updateActiveContent(content: string) {
   if (!tab || tab.readOnly || tab.content === content) return
   tab.content = content
   tab.revision += 1
-  tab.dirty = tab.content !== tab.diskContent
+  tab.dirty = editorTabIsDirty(tab)
   tab.saveError = undefined
   scheduleSave(tab)
 }
@@ -53,6 +54,7 @@ export async function saveTab(tab: EditorTab, expectedShaOverride?: string | nul
   if (existing) return existing
 
   const task = (async () => {
+    await waitForTabUploads(tab)
     let expectedSha = expectedShaOverride
     do {
       await saveEditorTabUntilStable(
@@ -72,11 +74,6 @@ export async function saveTab(tab: EditorTab, expectedShaOverride?: string | nul
         (reason) => handleSaveFailure(tab, reason),
       )
       expectedSha = undefined
-      try {
-        await refreshStatusForRoot(tab.root)
-      } catch (reason) {
-        setError(reason)
-      }
     } while (tab.dirty)
   })()
     .finally(() => {
@@ -130,7 +127,7 @@ export async function chooseExternalVersion(choice: 'disk' | 'editor') {
       }
       const disk = await nativeApi.readDocument({ root: tab.root, path: tab.path })
       tab.content = disk.content
-      tab.diskContent = disk.content
+      tab.diskContent = retainedDiskContent(disk.content)
       tab.sha256 = disk.sha256
       tab.modifiedMs = disk.modifiedMs
       tab.revision += 1
@@ -162,11 +159,6 @@ export async function closeTab(tab: EditorTab) {
   }
 }
 
-export async function refreshStatusForRoot(root: string) {
-  if (!root || !isTauri() || !activeWorkspace.value?.git) return
-  updateWorktreeStatus(root, await nativeApi.workspaceGitStatus({ root }))
-}
-
 export async function flushAll(root?: string) {
   if (!isTauri()) return
   const targetSessions = root
@@ -185,10 +177,19 @@ export async function reconcileOpenTabs(
   session: WorkspaceSession,
   nextEntries: WorkspaceEntry[],
   generation: number,
+  changedPaths?: ReadonlySet<string>,
 ) {
   const available = new Map(nextEntries.map((entry) => [entry.path, entry]))
   for (const tab of [...session.tabs]) {
     if (session.loadGeneration !== generation) return
+    if (
+      changedPaths &&
+      ![...changedPaths].some(
+        (path) => tab.path === path || tab.path.startsWith(`${path}/`),
+      )
+    ) {
+      continue
+    }
     const descriptor = available.get(tab.path)
     if (!descriptor || !['markdown', 'text'].includes(descriptor.fileKind ?? '')) {
       if (tab.dirty) {
@@ -224,7 +225,7 @@ export async function reconcileOpenTabs(
         })
       } else {
         tab.content = disk.content
-        tab.diskContent = disk.content
+        tab.diskContent = retainedDiskContent(disk.content)
         tab.sha256 = disk.sha256
         tab.modifiedMs = disk.modifiedMs
         tab.encoding = disk.encoding
@@ -267,6 +268,7 @@ export function removeTab(session: WorkspaceSession, tab: EditorTab) {
     const next = session.tabs[Math.min(index, session.tabs.length - 1)]
     session.activeTabKey = next ? tabKey(next.root, next.path) : undefined
   }
+  persistSessionPaths(session)
 }
 
 export function disposeSession(root: string) {

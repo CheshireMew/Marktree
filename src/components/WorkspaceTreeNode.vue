@@ -3,9 +3,12 @@ import {
   ChevronDown,
   ChevronRight,
   File,
+  FileAudio,
   FileCode2,
   FileImage,
+  FileType2,
   FileText,
+  FileVideo,
   Folder,
   FolderOpen,
 } from 'lucide-vue-next'
@@ -21,6 +24,8 @@ const props = defineProps<{
   item: WorkspaceTreeItem
   depth: number
   expanded: Set<string>
+  recursive?: boolean
+  activePath?: string
 }>()
 
 const emit = defineEmits<{
@@ -36,6 +41,9 @@ function iconFor(entry: WorkspaceEntry) {
   }
   if (entry.fileKind === 'markdown') return FileText
   if (entry.fileKind === 'image') return FileImage
+  if (entry.fileKind === 'pdf') return FileType2
+  if (entry.fileKind === 'audio') return FileAudio
+  if (entry.fileKind === 'video') return FileVideo
   if (entry.fileKind === 'text') return FileCode2
   return File
 }
@@ -63,9 +71,13 @@ function dropInto(event: DragEvent) {
   <div class="workspace-tree-node">
     <button
       class="file-row tree-row"
-      :class="{ muted: item.entry.readOnly && item.entry.fileKind !== 'image' }"
+      :class="{
+        muted: item.entry.readOnly && item.entry.fileKind !== 'image',
+        active: item.entry.entryType === 'file' && item.entry.path === activePath,
+      }"
       :style="{ '--tree-depth': depth }"
       :title="item.entry.path"
+      :data-workspace-path="item.entry.path"
       draggable="true"
       @click="activate"
       @contextmenu.prevent="$emit('context', $event, item.entry)"
@@ -100,13 +112,14 @@ function dropInto(event: DragEvent) {
         }}
       </i>
     </button>
-    <template v-if="item.entry.entryType === 'directory' && expanded.has(item.entry.path)">
+    <template v-if="props.recursive !== false && item.entry.entryType === 'directory' && expanded.has(item.entry.path)">
       <WorkspaceTreeNode
         v-for="child in item.children"
         :key="child.entry.path"
         :item="child"
         :depth="depth + 1"
         :expanded="expanded"
+        :active-path="activePath"
         @toggle="$emit('toggle', $event)"
         @open="$emit('open', $event)"
         @context="(event, entry) => $emit('context', event, entry)"

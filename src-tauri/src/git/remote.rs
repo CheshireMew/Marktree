@@ -1,4 +1,4 @@
-#[cfg(test)]
+#[cfg(any(test, feature = "test-local-remotes"))]
 use std::path::Path;
 
 use git2::{
@@ -86,7 +86,7 @@ pub(super) fn validate_remote_url(remote_url: &str) -> AppResult<()> {
     {
         return Ok(());
     }
-    #[cfg(test)]
+    #[cfg(any(test, feature = "test-local-remotes"))]
     if Path::new(remote_url).exists()
         || url::Url::parse(remote_url)
             .ok()
